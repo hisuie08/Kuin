@@ -25,7 +25,7 @@
 
 #pragma comment(lib, "DbgHelp.lib")
 
-#define MSG_NUM (57 / 3)
+#define MSG_NUM (60 / 3)
 #define FUNC_NAME_MAX (128)
 #define MSG_MAX (128)
 #define LANG_NUM (2)
@@ -92,6 +92,12 @@ typedef struct SKeywordListCallbackParam
 	EAstTypeId ParentType;
 } SKeywordListCallbackParam;
 
+typedef struct SBreakPointAddr
+{
+	U64 Addr;
+	U8 Ope;
+} SBreakPointAddr;
+
 static const void*(*FuncGetSrc)(const U8*) = NULL;
 static void(*FuncLog)(const void*, S64, S64) = NULL;
 static const void* Src = NULL;
@@ -105,6 +111,11 @@ static Char HintBuf[HINT_MSG_NUM][0x08 + HINT_MSG_MAX + 1];
 static Char HintSrcBuf[0x08 + KUIN_MAX_PATH + 1];
 static int KeywordListNum = 0;
 static const SKeywordListItem** KeywordList = NULL;
+static S64 GlobalHeapCnt = 0;
+static S64 BreakPointNum = 0;
+static SPos* BreakPointPoses = NULL;
+static int BreakPointAddrNum = 0;
+static SBreakPointAddr* BreakPointAddrs = NULL;
 
 // Assembly functions.
 void* Call0Asm(void* func);
@@ -114,7 +125,7 @@ void* Call3Asm(void* arg1, void* arg2, void* arg3, void* func);
 
 static void LoadExcptMsg(S64 lang);
 static void DecSrc(void);
-static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclose)(FILE*), U16(*func_fgetwc)(FILE*), size_t(*func_size)(FILE*), const Char* path, const Char* sys_dir, const Char* output, const Char* icon, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
+static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclose)(FILE*), U16(*func_fgetwc)(FILE*), size_t(*func_size)(FILE*), const Char* path, const Char* sys_dir, const Char* output, const Char* icon, const void* related_files, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
 static FILE* BuildMemWfopen(const Char* file_name, const Char* mode);
 static int BuildMemFclose(FILE* file_ptr);
 static U16 BuildMemFgetwc(FILE* file_ptr);
@@ -123,6 +134,10 @@ static void BuildMemLog(const Char* code, const Char* msg, const Char* src, int 
 static size_t BuildFileGetSize(FILE* file_ptr);
 static SPos* AddrToPos(U64 addr, Char* name);
 static const void* AddrToPosCallback(U64 key, const void* value, void* param);
+static SPos* AddrToPosCallbackRecursion(const SList* stats, U64 addr);
+static U64 PosToAddr(const SPos* pos);
+static const void* PosToAddrCallback(U64 key, const void* value, void* param);
+static U64 PosToAddrCallbackRecursion(const SList* stats, const SPos* target_pos);
 static SArchiveFileList* SearchFiles(int* len, const Char* src);
 static Bool SearchFilesRecursion(int* len, size_t src_base_len, const Char* src, SArchiveFileList** top, SArchiveFileList** bottom);
 static U8 GetKey(U64 key, U8 data, U64 pos);
@@ -130,6 +145,9 @@ static void MakeKeywordList(SDict* asts);
 static const void* MakeKeywordListCallback(const Char* key, const void* value, void* param);
 static void MakeKeywordListRecursion(SKeywordListCallbackParam* param, const SAst* ast);
 static int CmpKeywordListItem(const void* a, const void* b);
+static void FreeBreakPoints(void);
+static void SetBreakPointOpes(HANDLE process_handle);
+static void UnsetBreakPointOpes(HANDLE process_handle);
 
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 {
@@ -141,17 +159,28 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 
 EXPORT void InitCompiler(S64 lang)
 {
+	if (!InitEnvVars(GetProcessHeap(), &GlobalHeapCnt, 0, NULL))
+		return;
+
 	InitAllocator();
 	if (lang >= 0)
 		LoadExcptMsg(lang);
+
+	BreakPointNum = 0;
+	BreakPointPoses = NULL;
+	BreakPointAddrs = NULL;
 }
 
 EXPORT void FinCompiler(void)
 {
+	if (BreakPointAddrs != NULL)
+		FreeMem(BreakPointAddrs);
+	FreeBreakPoints();
+
 	FinAllocator();
 }
 
-EXPORT Bool BuildMem(const U8* path, const void*(*func_get_src)(const U8*), const U8* sys_dir, const U8* output, const U8* icon, Bool rls, const U8* env, void(*func_log)(const void* args, S64 row, S64 col), S64 lang, S64 app_code)
+EXPORT Bool BuildMem(const U8* path, const void*(*func_get_src)(const U8*), const U8* sys_dir, const U8* output, const U8* icon, const void* related_files, Bool rls, const U8* env, void(*func_log)(const void* args, S64 row, S64 col), S64 lang, S64 app_code)
 {
 	// This function is for the Kuin Editor.
 	Bool result;
@@ -166,7 +195,7 @@ EXPORT Bool BuildMem(const U8* path, const void*(*func_get_src)(const U8*), cons
 		if (icon2[0] == L'\0')
 			icon2 = NULL;
 	}
-	result = Build(BuildMemWfopen, BuildMemFclose, BuildMemFgetwc, BuildMemGetSize, (const Char*)(path + 0x10), sys_dir == NULL ? NULL : (const Char*)(sys_dir + 0x10), output == NULL ? NULL : (const Char*)(output + 0x10), icon2, rls, env == NULL ? NULL : (const Char*)(env + 0x10), BuildMemLog, lang, app_code, False);
+	result = Build(BuildMemWfopen, BuildMemFclose, BuildMemFgetwc, BuildMemGetSize, (const Char*)(path + 0x10), sys_dir == NULL ? NULL : (const Char*)(sys_dir + 0x10), output == NULL ? NULL : (const Char*)(output + 0x10), icon2, related_files, rls, env == NULL ? NULL : (const Char*)(env + 0x10), BuildMemLog, lang, app_code, False);
 	FuncGetSrc = NULL;
 	FuncLog = NULL;
 	DecSrc();
@@ -176,12 +205,12 @@ EXPORT Bool BuildMem(const U8* path, const void*(*func_get_src)(const U8*), cons
 	return result;
 }
 
-EXPORT Bool BuildFile(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy)
+EXPORT Bool BuildFile(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, const void* related_files, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy)
 {
 	// This function is for 'kuincl'.
 	Bool result;
 	InitAllocator();
-	result = Build(_wfopen, fclose, fgetwc, BuildFileGetSize, path, sys_dir, output, icon, rls, env, func_log, lang, app_code, not_deploy);
+	result = Build(_wfopen, fclose, fgetwc, BuildFileGetSize, path, sys_dir, output, icon, related_files, rls, env, func_log, lang, app_code, not_deploy);
 	FinAllocator();
 	return result;
 }
@@ -252,8 +281,8 @@ EXPORT Bool Interpret2(const U8* path, const void*(*func_get_src)(const U8*), co
 
 EXPORT void Version(S64* major, S64* minor, S64* micro)
 {
-	*major = 2018;
-	*minor = 7;
+	*major = 2019;
+	*minor = 9;
 	*micro = 17;
 }
 
@@ -264,7 +293,7 @@ EXPORT void ResetMemAllocator(void)
 	KeywordList = NULL;
 }
 
-EXPORT void GetKeywords(void* src, const U8* src_name, S64 x, S64 y, void* callback)
+EXPORT void* GetKeywords(void* src, const U8* src_name, S64 x, S64 y, void* callback)
 {
 	void* str = *(void**)((U8*)src + 0x10);
 	// void* comment_level = *(void**)((U8*)src + 0x20);
@@ -276,10 +305,10 @@ EXPORT void GetKeywords(void* src, const U8* src_name, S64 x, S64 y, void* callb
 
 	const Char* str3 = (Char*)((U8*)*str2 + 0x10);
 
-	GetKeywordsRoot(&str3, str3 + x + 1, (const Char*)(src_name + 0x10), (int)x, (int)y, flags2, callback, KeywordListNum, (const void*)KeywordList);
+	return GetKeywordsRoot(&str3, str3 + x + 1, (const Char*)(src_name + 0x10), (int)x, (int)y, flags2, callback, KeywordListNum, (const void*)KeywordList);
 }
 
-EXPORT Bool RunDbg(const U8* path, const U8* cmd_line, void* idle_func, void* event_func)
+EXPORT Bool RunDbg(const U8* path, const U8* cmd_line, void* idle_func, void* event_func, void* break_points_func, void* break_func, void* dbg_func)
 {
 	const Char* path2 = (const Char*)(path + 0x10);
 	Char cur_dir[KUIN_MAX_PATH + 1];
@@ -314,172 +343,210 @@ EXPORT Bool RunDbg(const U8* path, const U8* cmd_line, void* idle_func, void* ev
 		free(cmd_line_buf);
 
 	{
-		DEBUG_EVENT debug_event;
+		DEBUG_EVENT debug_event = { 0 };
 		Bool end = False;
 		DbgStartAddr = 0;
 		ResumeThread(process_info.hThread);
-		S64 excpt_last_occurred = _time64(NULL) - 2;
-		Char dbg_code = L'\0';
 		while (!end)
 		{
 			DWORD continue_status = DBG_EXCEPTION_NOT_HANDLED;
 			Call0Asm(idle_func);
-			WaitForDebugEvent(&debug_event, 0);
+			Sleep(1);
+			for (; ; )
+			{
+				WaitForDebugEvent(&debug_event, 0);
+				if (debug_event.dwProcessId != process_info.dwProcessId)
+				{
+					ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, DBG_EXCEPTION_NOT_HANDLED);
+					continue;
+				}
+				break;
+			}
 			switch (debug_event.dwDebugEventCode)
 			{
 				case CREATE_PROCESS_DEBUG_EVENT:
 					DbgStartAddr = (U64)debug_event.u.CreateProcessInfo.lpBaseOfImage;
-					CloseHandle(debug_event.u.CreateProcessInfo.hFile);
+					if (debug_event.u.CreateProcessInfo.hFile != 0)
+						CloseHandle(debug_event.u.CreateProcessInfo.hFile);
+					Call0Asm(break_points_func);
+					SetBreakPointOpes(process_info.hProcess);
 					break;
 				case LOAD_DLL_DEBUG_EVENT:
-					CloseHandle(debug_event.u.LoadDll.hFile);
+					if (debug_event.u.LoadDll.hFile != 0)
+					{
+						__try
+						{
+							CloseHandle(debug_event.u.LoadDll.hFile);
+						}
+						__except (EXCEPTION_EXECUTE_HANDLER)
+						{
+							// Do nothing.
+						}
+					}
 					break;
 				case EXIT_PROCESS_DEBUG_EVENT:
 					end = True;
 					break;
 				case EXCEPTION_DEBUG_EVENT:
-					/*
-					if (debug_event.u.Exception.ExceptionRecord.ExceptionCode == 0x80000003)
-						break;
-					*/
-					if ((debug_event.u.Exception.ExceptionRecord.ExceptionCode & 0xffff0000) != 0xc0000000 && (debug_event.u.Exception.ExceptionRecord.ExceptionCode & 0xffff0000) != 0xe9170000)
-						break;
-					if (_time64(NULL) - excpt_last_occurred < 2)
-						break;
 					{
-						Char str[EXCPT_MSG_MAX + 1];
-						size_t len2;
-						CONTEXT context;
-						STACKFRAME64 stack;
-						IMAGEHLP_SYMBOL64 symbol;
-						memset(&context, 0, sizeof(context));
-						context.ContextFlags = CONTEXT_FULL;
-						if (!GetThreadContext(process_info.hThread, &context))
-							break;
-						memset(&stack, 0, sizeof(stack));
-						stack.AddrPC.Offset = context.Rip;
-						stack.AddrPC.Mode = AddrModeFlat;
-						stack.AddrStack.Offset = context.Rsp;
-						stack.AddrStack.Mode = AddrModeFlat;
-						stack.AddrFrame.Offset = context.Rbp;
-						stack.AddrFrame.Mode = AddrModeFlat;
-						SymInitialize(process_info.hProcess, NULL, TRUE);
+						const DWORD excpt_code = debug_event.u.Exception.ExceptionRecord.ExceptionCode;
+						if (excpt_code == EXCEPTION_SINGLE_STEP)
 						{
-							DWORD code = debug_event.u.Exception.ExceptionRecord.ExceptionCode;
-#if defined(_DEBUG)
-							PVOID addr = debug_event.u.Exception.ExceptionRecord.ExceptionAddress;
-#endif
-							const Char* text = ExcptMsgs[0].Msg;
-							if (code <= 0x0000ffff)
-								text = ExcptMsgs[1].Msg;
-							else
+							CONTEXT context;
+							context.ContextFlags = CONTEXT_CONTROL;
+							GetThreadContext(process_info.hThread, &context);
+							Call0Asm(break_points_func);
+							SetBreakPointOpes(process_info.hProcess);
+							context.EFlags &= ~0x00000100;
+							SetThreadContext(process_info.hThread, &context);
+							continue_status = DBG_CONTINUE;
+							break;
+						}
+						int break_point_idx = -1;
+						if (excpt_code == EXCEPTION_BREAKPOINT)
+						{
+							if (BreakPointAddrs != NULL)
 							{
-								int min = 0;
-								int max = MSG_NUM - 1;
-								int found = -1;
-								while (min <= max)
+								int i;
+								for (i = 0; i < BreakPointAddrNum; i++)
 								{
-									int mid = (min + max) / 2;
-									if ((S64)code < ExcptMsgs[mid].Code)
-										max = mid - 1;
-									else if ((S64)code > ExcptMsgs[mid].Code)
-										min = mid + 1;
-									else
+									if (BreakPointAddrs[i].Addr != 0 && BreakPointAddrs[i].Addr == (U64)debug_event.u.Exception.ExceptionRecord.ExceptionAddress)
 									{
-										found = mid;
+										break_point_idx = i;
 										break;
 									}
 								}
-								if (found != -1)
-									text = ExcptMsgs[found].Msg;
 							}
-#if defined(_DEBUG)
-							len2 = swprintf(str, EXCPT_MSG_MAX, L"An exception '0x%08X' occurred at '0x%016I64X'.\r\n\r\n> %s\r\n\r\n", code, (U64)addr, text);
-#else
-							len2 = swprintf(str, EXCPT_MSG_MAX, L"An exception '0x%08X' occurred.\r\n\r\n> %s\r\n\r\n", code, text);
-#endif
 						}
-
-						for (; ; )
+						if (break_point_idx == -1 && (excpt_code & 0xffff0000) != 0xc0000000 && (excpt_code & 0xffff0000) != 0xe9170000)
+							break;
+						Call3Asm((void*)0, NULL, NULL, dbg_func);
 						{
-							if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process_info.hProcess, process_info.hThread, &stack, &context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+							Char str_buf[0x08 + EXCPT_MSG_MAX + 1];
+							Char* str = str_buf + 0x08;
+							CONTEXT context;
+							CONTEXT context2;
+							STACKFRAME64 stack;
+							IMAGEHLP_SYMBOL64 symbol;
+							memset(&context, 0, sizeof(context));
+							context.ContextFlags = CONTEXT_FULL;
+							if (!GetThreadContext(process_info.hThread, &context))
 								break;
-
-#if defined(_DEBUG)
-							if (len2 < EXCPT_MSG_MAX)
-								len2 += swprintf(str + len2, EXCPT_MSG_MAX - len2, L"0x%016I64X: \t", context.Rip);
-#endif
-
-							symbol.SizeOfStruct = sizeof(IMAGEHLP_SYMBOL64);
-							symbol.MaxNameLength = 255;
-							DWORD64 displacement;
-							if (SymGetSymFromAddr64(process_info.hProcess, (DWORD64)stack.AddrPC.Offset, &displacement, &symbol))
+							context2 = context;
+							memset(&stack, 0, sizeof(stack));
+							stack.AddrPC.Offset = context2.Rip;
+							stack.AddrPC.Mode = AddrModeFlat;
+							stack.AddrStack.Offset = context2.Rsp;
+							stack.AddrStack.Mode = AddrModeFlat;
+							stack.AddrFrame.Offset = context2.Rbp;
+							stack.AddrFrame.Mode = AddrModeFlat;
+							SymInitialize(process_info.hProcess, NULL, TRUE);
 							{
-#if defined(_DEBUG)
-								char name[1024];
-								UnDecorateSymbolName(symbol.Name, (PSTR)name, 1024, UNDNAME_COMPLETE);
+								const Char* text = ExcptMsgs[0].Msg;
+								if (excpt_code <= 0x0000ffff)
+									text = ExcptMsgs[1].Msg;
+								else
 								{
-									char* src = name;
-									if (len2 < EXCPT_MSG_MAX)
+									int min = 0;
+									int max = MSG_NUM - 1;
+									int found = -1;
+									while (min <= max)
 									{
-										str[len2] = L'(';
-										len2++;
+										int mid = (min + max) / 2;
+										if ((S64)excpt_code < ExcptMsgs[mid].Code)
+											max = mid - 1;
+										else if ((S64)excpt_code > ExcptMsgs[mid].Code)
+											min = mid + 1;
+										else
+										{
+											found = mid;
+											break;
+										}
 									}
-									while (*src != L'\0')
-									{
-										if (len2 < EXCPT_MSG_MAX)
-											str[len2] = (Char)*src;
-										len2++;
-										src++;
-									}
-									if (len2 < EXCPT_MSG_MAX)
-									{
-										str[len2] = L')';
-										len2++;
-									}
-									if (len2 < EXCPT_MSG_MAX)
-									{
-										str[len2] = L'\r';
-										len2++;
-									}
-									if (len2 < EXCPT_MSG_MAX)
-									{
-										str[len2] = L'\n';
-										len2++;
-									}
+									if (found != -1)
+										text = ExcptMsgs[found].Msg;
 								}
-#endif
+								swprintf(str, EXCPT_MSG_MAX, L"%s\nAn exception '0x%08X' occurred.", text, excpt_code);
 							}
-							else
+
+							SPos* excpt_pos = NULL;
+							for (; ; )
 							{
-								Char name[256];
-								SPos* pos = AddrToPos((U64)context.Rip, name);
-								if (pos != NULL)
+								if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process_info.hProcess, process_info.hThread, &stack, &context2, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+									break;
+								symbol.SizeOfStruct = sizeof(IMAGEHLP_SYMBOL64);
+								symbol.MaxNameLength = 255;
+								DWORD64 displacement;
+								if (SymGetSymFromAddr64(process_info.hProcess, (DWORD64)stack.AddrPC.Offset, &displacement, &symbol))
 								{
-									if (len2 < EXCPT_MSG_MAX)
-										len2 += swprintf(str + len2, EXCPT_MSG_MAX - len2, L"%s (%s: %d, %d)\r\n", name, pos->SrcName, pos->Row, pos->Col);
+									/*
+									char name[1024];
+									UnDecorateSymbolName(symbol.Name, (PSTR)name, 1024, UNDNAME_COMPLETE);
+									*/
 								}
 								else
 								{
-									if (len2 < EXCPT_MSG_MAX)
+									Char name[256];
+									SPos* pos = AddrToPos((U64)context2.Rip, name);
+									if (excpt_pos == NULL)
 									{
-										str[len2] = L'\r';
-										len2++;
+										if (wcschr(name, L'@') == NULL)
+											break;
+										else
+											excpt_pos = pos;
 									}
-									if (len2 < EXCPT_MSG_MAX)
+									if (pos != NULL)
 									{
-										str[len2] = L'\n';
-										len2++;
+										Char buf[0x08 + 1024];
+										swprintf(buf + 0x08, 1024, L"%s (%s: %d, %d)", name, pos->SrcName, pos->Row, pos->Col);
+										((S64*)buf)[0] = 2;
+										((S64*)buf)[1] = (S64)wcslen(buf + 0x08);
+										Call3Asm((void*)2, buf, NULL, dbg_func);
 									}
 								}
+								if (stack.AddrPC.Offset == 0)
+									break;
 							}
-							if (stack.AddrPC.Offset == 0)
-								break;
+							if (excpt_pos != NULL)
+							{
+								GetDbgVars(KeywordListNum, KeywordList, excpt_pos->SrcName, excpt_pos->Row, process_info.hProcess, DbgStartAddr, &context, dbg_func);
+								{
+									void* pos_ptr = NULL;
+									Char pos_name[0x08 + 256];
+									U8 pos_buf[0x28];
+									{
+										size_t pos_name_len = wcslen(excpt_pos->SrcName);
+										((S64*)pos_name)[0] = 1;
+										((S64*)pos_name)[1] = (S64)pos_name_len;
+										memcpy((U8*)pos_name + 0x10, excpt_pos->SrcName, sizeof(Char) * (pos_name_len + 1));
+
+										((S64*)pos_buf)[0] = 2;
+										((S64*)pos_buf)[1] = 0;
+										((void**)pos_buf)[2] = pos_name;
+										((S64*)pos_buf)[3] = excpt_pos->Row;
+										((S64*)pos_buf)[4] = excpt_pos->Col;
+										pos_ptr = pos_buf;
+									}
+									((S64*)str_buf)[0] = 2;
+									((S64*)str_buf)[1] = wcslen(str);
+									Call3Asm((void*)(U64)excpt_code, pos_ptr, str_buf, break_func);
+								}
+								UnsetBreakPointOpes(process_info.hProcess);
+							}
+							if (break_point_idx != -1)
+							{
+								context.Rip--;
+								context.EFlags |= 0x00000100;
+								SetThreadContext(process_info.hThread, &context);
+								continue_status = DBG_CONTINUE;
+							}
+							else
+							{
+								Call0Asm(break_points_func);
+								SetBreakPointOpes(process_info.hProcess);
+							}
 						}
-						str[len2] = L'\0';
-						MessageBox(NULL, str, NULL, MB_ICONEXCLAMATION | MB_SETFOREGROUND);
 					}
-					excpt_last_occurred = _time64(NULL);
 					break;
 				case OUTPUT_DEBUG_STRING_EVENT:
 					{
@@ -511,17 +578,15 @@ EXPORT Bool RunDbg(const U8* path, const U8* cmd_line, void* idle_func, void* ev
 							((S64*)buf)[1] = (S64)debug_event.u.DebugString.nDebugStringLength - 1;
 						}
 						*((S64*)buf) = 2;
-						if (((S64*)buf)[1] >= 5)
+						if (((S64*)buf)[1] >= 4)
 						{
 							const Char* ptr = (const Char*)((U8*)buf + 0x10);
-							if (ptr[0] == L'd' && ptr[1] == L'b' && ptr[2] == L'g' && L'0' <= ptr[3] && ptr[3] <= L'9' && ptr[3] != dbg_code && ptr[4] == L'!')
-							{
-								dbg_code = ptr[3];
+							if (ptr[0] == L'd' && ptr[1] == L'b' && ptr[2] == L'g' && ptr[3] == L'!')
 								Call2Asm(0, buf, event_func);
-							}
 						}
 						free(buf);
 					}
+					continue_status = DBG_CONTINUE;
 					break;
 			}
 			ContinueDebugEvent(debug_event.dwProcessId, debug_event.dwThreadId, continue_status);
@@ -538,6 +603,65 @@ EXPORT Bool RunDbg(const U8* path, const U8* cmd_line, void* idle_func, void* ev
 	if (process_info.hProcess != NULL)
 		CloseHandle(process_info.hProcess);
 	return True;
+}
+
+EXPORT void SetBreakPoints(const void* break_points)
+{
+	S64 len = ((S64*)break_points)[1];
+	FreeBreakPoints();
+	BreakPointNum = len;
+	BreakPointPoses = (SPos*)AllocMem(sizeof(SPos) * (size_t)len);
+
+	void** ptr = (void**)((U8*)break_points + 0x10);
+	S64 i;
+	for (i = 0; i < len; i++)
+	{
+		Char* src_name = (Char*)((U8*)*(void**)((U8*)ptr[i] + 0x10) + 0x10);
+		int row = (int)*(S64*)((U8*)ptr[i] + 0x18);
+		int col = (int)*(S64*)((U8*)ptr[i] + 0x20);
+		S64 name_len = ((S64*)*(void**)((U8*)ptr[i] + 0x10))[1];
+
+		Bool success = False;
+		for (; ; )
+		{
+			Char name[256];
+			U64 addr;
+			SPos pos;
+			pos.SrcName = src_name;
+			pos.Row = row;
+			pos.Col = col;
+			addr = PosToAddr(&pos);
+			if (addr != 0)
+			{
+				SPos* pos2 = AddrToPos(addr, name);
+				if (pos2 != NULL && wcscmp(pos.SrcName, pos2->SrcName) == 0)
+				{
+					if (pos.Row != pos2->Row)
+					{
+						row = pos2->Row;
+						*(S64*)((U8*)ptr[i] + 0x18) = (S64)pos2->Row;
+						continue;
+					}
+					success = True;
+				}
+			}
+			break;
+		}
+		if (!success)
+		{
+			BreakPointPoses[i].SrcName = L"";
+			BreakPointPoses[i].Row = -1;
+			BreakPointPoses[i].Col = -1;
+			*(S64*)((U8*)ptr[i] + 0x18) = -1;
+			continue;
+		}
+
+		Char* buf = (Char*)AllocMem(sizeof(Char) * (size_t)(name_len + 1));
+		memcpy(buf, src_name, sizeof(Char) * (size_t)(name_len + 1));
+		BreakPointPoses[i].SrcName = buf;
+		BreakPointPoses[i].Row = row;
+		BreakPointPoses[i].Col = col;
+	}
 }
 
 EXPORT Bool Archive(const U8* dst, const U8* src, S64 app_code)
@@ -690,7 +814,7 @@ static void DecSrc(void)
 	}
 }
 
-static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclose)(FILE*), U16(*func_fgetwc)(FILE*), size_t(*func_size)(FILE*), const Char* path, const Char* sys_dir, const Char* output, const Char* icon, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy)
+static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclose)(FILE*), U16(*func_fgetwc)(FILE*), size_t(*func_size)(FILE*), const Char* path, const Char* sys_dir, const Char* output, const Char* icon, const void* related_files, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy)
 {
 	SOption option;
 	SDict* asts;
@@ -726,6 +850,8 @@ static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclos
 	entry = Analyze(asts, &option, &dlls);
 	if (ErrOccurred())
 		goto ERR;
+	if (!option.Rls)
+		MakeKeywordList(asts);
 	Err(L"IK0002", NULL, (double)(timeGetTime() - begin_time) / 1000.0);
 	Assemble(&PackAsm, entry, &option, dlls, app_code, use_res_flags);
 	if (ErrOccurred())
@@ -736,7 +862,7 @@ static Bool Build(FILE*(*func_wfopen)(const Char*, const Char*), int(*func_fclos
 		goto ERR;
 	Err(L"IK0004", NULL, (double)(timeGetTime() - begin_time) / 1000.0);
 	if (!option.NotDeploy)
-		Deploy(PackAsm.AppCode, &option, dlls);
+		Deploy(PackAsm.AppCode, &option, dlls, related_files);
 	if (ErrOccurred())
 		goto ERR;
 	Err(L"IK0005", NULL, (double)(timeGetTime() - begin_time) / 1000.0);
@@ -867,6 +993,7 @@ static size_t BuildFileGetSize(FILE* file_ptr)
 
 static SPos* AddrToPos(U64 addr, Char* name)
 {
+	name[0] = '\0';
 	SPos* result = NULL;
 	void* params[3];
 	params[0] = (void*)&result;
@@ -883,16 +1010,264 @@ static const void* AddrToPosCallback(U64 key, const void* value, void* param)
 	SPos** result = (SPos**)params[0];
 	U64 addr = (U64)params[1];
 	Char* name = (Char*)params[2];
-	UNUSED(value);
 	if ((U64)*func->AddrTop + DbgStartAddr <= addr && addr <= (U64)func->AddrBottom + DbgStartAddr)
 	{
 		*result = (SPos*)((SAst*)func)->Pos;
-		if (*result != NULL)
-			swprintf(name, 255, L"%s@%s", (*result)->SrcName, ((SAst*)func)->Name);
-		else
-			wcscpy(name, ((SAst*)func)->Name);
+		{
+			SPos* result2 = AddrToPosCallbackRecursion(func->Stats, addr);
+			if (result2 != NULL)
+			{
+				*result = result2;
+				swprintf(name, 255, L"%s@%s", (*result)->SrcName, ((SAst*)func)->Name);
+			}
+			else
+				wcscpy(name, ((SAst*)func)->Name);
+		}
 	}
 	return value;
+}
+
+static SPos* AddrToPosCallbackRecursion(const SList* stats, U64 addr)
+{
+	SListNode* ptr = stats->Top;
+	while (ptr != NULL)
+	{
+		SAstStat* stat = (SAstStat*)ptr->Data;
+		SPos* result;
+		if (stat->AsmTop != NULL && stat->AsmBottom != NULL && stat->AsmTop->Addr != NULL && stat->AsmBottom->Addr != NULL && (U64)*stat->AsmTop->Addr + DbgStartAddr <= addr && addr <= (U64)*stat->AsmBottom->Addr + DbgStartAddr)
+		{
+			SListNode* ptr2;
+			switch (((SAst*)stat)->TypeId)
+			{
+				case AstTypeId_StatIf:
+					{
+						SAstStatIf* stat2 = (SAstStatIf*)stat;
+						result = AddrToPosCallbackRecursion(stat2->StatBlock->Stats, addr);
+						if (result != NULL)
+							return result;
+						ptr2 = stat2->ElIfs->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatElIf* elif = (SAstStatElIf*)ptr2->Data;
+							result = AddrToPosCallbackRecursion(elif->StatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->ElseStatBlock != NULL)
+						{
+							result = AddrToPosCallbackRecursion(stat2->ElseStatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatSwitch:
+					{
+						SAstStatSwitch* stat2 = (SAstStatSwitch*)stat;
+						ptr2 = stat2->Cases->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatCase* case_ = (SAstStatCase*)ptr2->Data;
+							result = AddrToPosCallbackRecursion(case_->StatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->DefaultStatBlock != NULL)
+						{
+							result = AddrToPosCallbackRecursion(stat2->DefaultStatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatWhile:
+					{
+						SAstStatWhile* stat2 = (SAstStatWhile*)stat;
+						result = AddrToPosCallbackRecursion(stat2->Stats, addr);
+						if (result != NULL)
+							return result;
+					}
+					break;
+				case AstTypeId_StatFor:
+					{
+						SAstStatFor* stat2 = (SAstStatFor*)stat;
+						result = AddrToPosCallbackRecursion(stat2->Stats, addr);
+						if (result != NULL)
+							return result;
+					}
+					break;
+				case AstTypeId_StatTry:
+					{
+						SAstStatTry* stat2 = (SAstStatTry*)stat;
+						result = AddrToPosCallbackRecursion(stat2->StatBlock->Stats, addr);
+						if (result != NULL)
+							return result;
+						ptr2 = stat2->Catches->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatCatch* catch_ = (SAstStatCatch*)ptr2->Data;
+							result = AddrToPosCallbackRecursion(catch_->StatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->FinallyStatBlock != NULL)
+						{
+							result = AddrToPosCallbackRecursion(stat2->FinallyStatBlock->Stats, addr);
+							if (result != NULL)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatBlock:
+					{
+						SAstStatBlock* stat2 = (SAstStatBlock*)stat;
+						result = AddrToPosCallbackRecursion(stat2->Stats, addr);
+						if (result != NULL)
+							return result;
+					}
+					break;
+			}
+			return (SPos*)((SAst*)stat)->Pos;
+		}
+		ptr = ptr->Next;
+	}
+	return NULL;
+}
+
+static U64 PosToAddr(const SPos* pos)
+{
+	U64 addr = 0;
+	void* params[2];
+	params[0] = &addr;
+	params[1] = (void*)pos;
+	DictIForEach(PackAsm.FuncAddrs, PosToAddrCallback, params);
+	return addr;
+}
+
+static const void* PosToAddrCallback(U64 key, const void* value, void* param)
+{
+	SAstFunc* func = (SAstFunc*)key;
+	void** params = (void**)param;
+	U64* addr = (U64*)params[0];
+	const SPos* pos = (const SPos*)params[1];
+	const SPos* func_pos = ((SAst*)func)->Pos;
+	if (*addr == 0 && func_pos != NULL && wcscmp(func_pos->SrcName, pos->SrcName) == 0 && func_pos->Row <= pos->Row && pos->Row <= func->PosRowBottom)
+		*addr = PosToAddrCallbackRecursion(func->Stats, pos);
+	return value;
+}
+
+static U64 PosToAddrCallbackRecursion(const SList* stats, const SPos* target_pos)
+{
+	SListNode* ptr = stats->Top;
+	while (ptr != NULL)
+	{
+		SAstStat* stat = (SAstStat*)ptr->Data;
+		const SPos* stat_pos = ((SAst*)stat)->Pos;
+		if (stat->AsmTop != NULL && stat_pos != NULL && wcscmp(stat_pos->SrcName, target_pos->SrcName) == 0 && stat_pos->Row <= target_pos->Row && target_pos->Row <= stat->PosRowBottom)
+		{
+			U64 result;
+			SListNode* ptr2;
+			switch (((SAst*)stat)->TypeId)
+			{
+				case AstTypeId_StatIf:
+					{
+						SAstStatIf* stat2 = (SAstStatIf*)stat;
+						result = PosToAddrCallbackRecursion(stat2->StatBlock->Stats, target_pos);
+						if (result != 0)
+							return result;
+						ptr2 = stat2->ElIfs->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatElIf* elif = (SAstStatElIf*)ptr2->Data;
+							result = PosToAddrCallbackRecursion(elif->StatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->ElseStatBlock != NULL)
+						{
+							result = PosToAddrCallbackRecursion(stat2->ElseStatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatSwitch:
+					{
+						SAstStatSwitch* stat2 = (SAstStatSwitch*)stat;
+						ptr2 = stat2->Cases->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatCase* case_ = (SAstStatCase*)ptr2->Data;
+							result = PosToAddrCallbackRecursion(case_->StatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->DefaultStatBlock != NULL)
+						{
+							result = PosToAddrCallbackRecursion(stat2->DefaultStatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatWhile:
+					{
+						SAstStatWhile* stat2 = (SAstStatWhile*)stat;
+						result = PosToAddrCallbackRecursion(stat2->Stats, target_pos);
+						if (result != 0)
+							return result;
+					}
+					break;
+				case AstTypeId_StatFor:
+					{
+						SAstStatFor* stat2 = (SAstStatFor*)stat;
+						result = PosToAddrCallbackRecursion(stat2->Stats, target_pos);
+						if (result != 0)
+							return result;
+					}
+					break;
+				case AstTypeId_StatTry:
+					{
+						SAstStatTry* stat2 = (SAstStatTry*)stat;
+						result = PosToAddrCallbackRecursion(stat2->StatBlock->Stats, target_pos);
+						if (result != 0)
+							return result;
+						ptr2 = stat2->Catches->Top;
+						while (ptr2 != NULL)
+						{
+							SAstStatCatch* catch_ = (SAstStatCatch*)ptr2->Data;
+							result = PosToAddrCallbackRecursion(catch_->StatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+							ptr2 = ptr2->Next;
+						}
+						if (stat2->FinallyStatBlock != NULL)
+						{
+							result = PosToAddrCallbackRecursion(stat2->FinallyStatBlock->Stats, target_pos);
+							if (result != 0)
+								return result;
+						}
+					}
+					break;
+				case AstTypeId_StatBlock:
+					{
+						SAstStatBlock* stat2 = (SAstStatBlock*)stat;
+						result = PosToAddrCallbackRecursion(stat2->Stats, target_pos);
+						if (result != 0)
+							return result;
+					}
+					break;
+			}
+			return (U64)*stat->AsmTop->Addr + DbgStartAddr;
+		}
+		ptr = ptr->Next;
+	}
+	return 0;
 }
 
 static SArchiveFileList* SearchFiles(int* len, const Char* src)
@@ -1033,6 +1408,8 @@ static void MakeKeywordListRecursion(SKeywordListCallbackParam* param, const SAs
 				case AstTypeId_Class:
 					if (ast->TypeId == AstTypeId_Arg || ast->TypeId == AstTypeId_Func)
 						keyword->Name = NewStr(NULL, L".%s", ast->Name);
+					else
+						keyword->Name = ast->Name;
 					break;
 				default:
 					keyword->Name = ast->Name;
@@ -1085,4 +1462,59 @@ static int CmpKeywordListItem(const void* a, const void* b)
 			cmp = *b2->Last - *a2->Last;
 	}
 	return cmp;
+}
+
+static void FreeBreakPoints(void)
+{
+	if (BreakPointPoses != NULL)
+	{
+		S64 i;
+		for (i = 0; i < BreakPointNum; i++)
+		{
+			if (BreakPointPoses[i].SrcName[0] != L'\0')
+				FreeMem((void*)BreakPointPoses[i].SrcName);
+		}
+		FreeMem(BreakPointPoses);
+	}
+}
+
+static void SetBreakPointOpes(HANDLE process_handle)
+{
+	if (BreakPointAddrs != NULL)
+		FreeMem(BreakPointAddrs);
+	BreakPointAddrNum = (int)BreakPointNum;
+	BreakPointAddrs = (SBreakPointAddr*)AllocMem(sizeof(SBreakPointAddr) * (size_t)(BreakPointNum));
+	S64 i;
+	for (i = 0; i < BreakPointNum; i++)
+	{
+		U64 addr = PosToAddr(&BreakPointPoses[i]);
+		if (addr == 0)
+		{
+			BreakPointAddrs[i].Addr = 0;
+			BreakPointAddrs[i].Ope = 0;
+			continue;
+		}
+		U8 old_code;
+		U8 int3_code = 0xcc;
+		ReadProcessMemory(process_handle, (LPVOID)addr, &old_code, 1, NULL);
+		WriteProcessMemory(process_handle, (LPVOID)addr, &int3_code, 1, NULL);
+		BreakPointAddrs[i].Addr = addr;
+		BreakPointAddrs[i].Ope = old_code;
+	}
+	FlushInstructionCache(process_handle, NULL, 0);
+}
+
+static void UnsetBreakPointOpes(HANDLE process_handle)
+{
+	if (BreakPointAddrs == NULL)
+		return;
+	S64 i;
+	for (i = BreakPointNum - 1; i >= 0; i--)
+	{
+		if (BreakPointAddrs[i].Addr == 0)
+			continue;
+		U8 new_code = BreakPointAddrs[i].Ope;
+		WriteProcessMemory(process_handle, (LPVOID)BreakPointAddrs[i].Addr, &new_code, 1, NULL);
+	}
+	FlushInstructionCache(process_handle, NULL, 0);
 }

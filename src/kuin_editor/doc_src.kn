@@ -40,6 +40,9 @@ end func
 +class DocSrc(\doc@Doc)
 	*func ctor()
 		do super(me)
+		do me.undo :: #undo@Undo
+		do me.undo.init(1024)
+
 		do me.src :: #Src
 		do me.src.src :: null
 		do me.src.color :: null
@@ -56,11 +59,14 @@ end func
 		do me.resetListInfoItem()
 		do me.dirtyLine :: -1
 		do me.dirtyLineForce :: false
+		do me.caretX :: -1
+		do me.caretY :: -1
+		do me.caretShown :: false
 	end func
 
-	+*func update()
+	+*func fix()
 		do me.dirtyLineForce :: true
-		do me.interpret1SetDirty(-1, false)
+		do me.interpret1SetDirty(-1, false, false)
 	end func
 
 	+*func load(path: []char): bool
@@ -95,8 +101,12 @@ end func
 		ret true
 	end func
 
+	+*func getSrc(): [][]char
+		ret me.src.src
+	end func
+
 	+*func draw(width: int, height: int)
-		do draw@rect(0.0, 0.0, width $ float, height $ float, \common@colorBack)
+		do draw@rect(0.0, 0.0, width $ float, height $ float, \form@getLockingEditor() | me.lock ?(\common@colorBackLocked, \common@colorBack))
 		var lineX: float :: (me.lineNumWidth - 2) $ float
 		do draw@line(lineX, 0.0, lineX, height $ float, colorLineNum)
 		for i(0, ^me.src.src - 1 - me.pageY)
@@ -105,7 +115,19 @@ end func
 				skip i
 			end if
 			var str: []char :: (me.pageY + i + 1).toStr()
-			do \common@font.draw((me.lineNumWidth - (^str + 1) * \common@cellWidth + \common@cellWidth / 2) $ float, y, str, colorLineNum)
+			var flags: LineFlag :: me.pageY + i >= ^me.src.flags ?(%none, me.src.flags[me.pageY + i])
+			if(flags.and(%breakPoint) <> %none)
+				do draw@rect(1.0, y + 1.0, lineX - 2.0, \common@cellHeight $ float - 2.0, colorBreakPointBack)
+				if(\src@breakPos <>& null & \src@breakPos.src = \src@curDocName & \src@breakPos.row = me.pageY + i + 1)
+					do draw@rect(1.0, y + 1.0, (lineX - 2.0) / 2.0, \common@cellHeight $ float - 2.0, colorBreakBack)
+				end if
+				do \common@font.draw((me.lineNumWidth - (^str + 1) * \common@cellWidth + \common@cellWidth / 2) $ float, y, str, colorBreakPoint)
+			else
+				if(\src@breakPos <>& null & \src@breakPos.src = \src@curDocName & \src@breakPos.row = me.pageY + i + 1)
+					do draw@rect(1.0, y + 1.0, (lineX - 2.0) / 2.0, \common@cellHeight $ float - 2.0, colorBreakBack)
+				end if
+				do \common@font.draw((me.lineNumWidth - (^str + 1) * \common@cellWidth + \common@cellWidth / 2) $ float, y, str, colorLineNum)
+			end if
 		end for
 
 		var areaX1: int :: me.areaX
@@ -181,64 +203,8 @@ end func
 				end if
 			end for
 		end for
-	end func
 
-	+*func updateProp(listView: wnd@ListView)
-		do me.errList.sort()
-		do me.errList.head()
-		while(!me.errList.term())
-			do listView.add(me.errList.get().text)
-			do me.errList.next()
-		end while
-	end func
-
-	+*func updateTree(tree: wnd@TreeMulti)
-		; TODO:
-	end func
-
-	+*func updateList(list_: wnd@List)
-		do \snippet@updateList(list_)
-	end func
-
-	+*func treeItemOnSel()
-		; TODO:
-	end func
-
-	+*func treeItemOnMoveNode()
-		; TODO:
-	end func
-
-	+*func listObjOnSel()
-		var sel: int :: \form@listObj.getSel()
-		if(sel = -1)
-			ret
-		end if
-		var code: []char :: \snippet@getCode(\form@listObj.getText(sel))
-		if(code =& null)
-			do \form@updateList()
-			ret
-		end if
-		do me.undo.recordBegin()
-		if(me.areaSel())
-			do me.delAreaStr()
-		end if
-		do me.ins(me.cursorX, me.cursorY, code, true)
-		do me.interpret1SetDirty(me.cursorY, true)
-		do me.undo.recordEnd()
-		do me.refreshCursor(false, true)
-		do \form@paintDrawEditor()
-	end func
-
-	+*func listPropOnSel(listView: wnd@ListView)
-	end func
-
-	+*func listPropOnMouseClick(listView: wnd@ListView)
-		var sel: int :: listView.getSel()
-		if(sel <> -1 & sel < ^me.errList)
-			do me.errList.head()
-			var item: @ErrListItem :: me.errList.getOffset(sel)
-			do \src@jumpSrc(item.pos)
-		end if
+		do draw@rect(me.caretX $ float, me.caretY $ float, 2.0, \common@cellHeight $ float, 0xFF000000)
 	end func
 
 	+*func mouseDownL(x: int, y: int)
@@ -249,7 +215,8 @@ end func
 			do me.areaX :: me.cursorX
 			do me.areaY :: me.cursorY
 		end if
-		do me.interpret1SetDirty(me.cursorY, false)
+		do me.interpret1SetDirty(me.cursorY, false, false)
+		do \completion@close()
 		do \form@paintDrawEditor()
 	end func
 
@@ -277,7 +244,7 @@ end func
 				do me.cursorX :+ 1
 			end while
 		end if
-		do me.interpret1SetDirty(me.cursorY, false)
+		do me.interpret1SetDirty(me.cursorY, false, false)
 		do \form@paintDrawEditor()
 	end func
 
@@ -285,18 +252,22 @@ end func
 		if(\form@dragging())
 			do me.mousePosToCharPos(x, y)
 			do me.refreshCursor(false, true)
-			do me.interpret1SetDirty(me.cursorY, false)
+			do me.interpret1SetDirty(me.cursorY, false, false)
 			do \form@paintDrawEditor()
 		end if
 	end func
 
 	+*func focus(isFocus: bool)
 		if(isFocus)
-			do \form@drawEditor.showCaret(\common@cellHeight, \common@font)
-			do me.refreshCursor(false, true)
+			do me.caretShown :: true
+			do me.updateScrollBar()
 		else
-			do \form@drawEditor.hideCaret()
+			do me.caretShown :: false
 		end if
+	end func
+
+	+*func updateScrollBar()
+		do me.refreshCursor(false, true)
 	end func
 
 	+*func keyDown(key: wnd@Key, shiftCtrl: wnd@ShiftCtrl): bool
@@ -307,8 +278,7 @@ end func
 			end if
 			ret true
 		case %bs
-			if (\form@getLockingEditor())
-				do \form@showMsgRunning()
+			if(me.locked())
 				ret true
 			end if
 			if(shiftCtrl = %none)
@@ -318,7 +288,7 @@ end func
 				else
 					do me.bs(me.cursorX, me.cursorY, 1, true)
 				end if
-				do me.interpret1SetDirty(me.cursorY, true)
+				do me.interpret1SetDirty(me.cursorY, true, false)
 				do me.undo.recordEnd()
 				do me.refreshCursor(false, true)
 				do \form@paintDrawEditor()
@@ -327,14 +297,13 @@ end func
 		case %tab
 			switch(shiftCtrl)
 			case %none
-				if (\form@getLockingEditor())
-					do \form@showMsgRunning()
+				if(me.locked())
 					ret true
 				end if
 				if(!me.areaSel())
 					do me.undo.recordBegin()
 					do me.ins(me.cursorX, me.cursorY, "\t", true)
-					do me.interpret1SetDirty(me.cursorY, true)
+					do me.interpret1SetDirty(me.cursorY, true, false)
 					do me.undo.recordEnd()
 					do me.refreshCursor(false, true)
 					do \form@paintDrawEditor()
@@ -345,8 +314,7 @@ end func
 				end if
 				ret true
 			case %shift
-				if (\form@getLockingEditor())
-					do \form@showMsgRunning()
+				if(me.locked())
 					ret true
 				end if
 				if(me.areaSel())
@@ -357,8 +325,7 @@ end func
 				ret true
 			end switch
 		case %enter
-			if (\form@getLockingEditor())
-				do \form@showMsgRunning()
+			if(me.locked())
 				ret true
 			end if
 			if(shiftCtrl = %none)
@@ -368,7 +335,7 @@ end func
 						do me.delAreaStr()
 					end if
 					do me.ins(me.cursorX, me.cursorY, "\n", true)
-					do me.interpret1SetDirty(me.cursorY, true)
+					do me.interpret1SetDirty(me.cursorY, true, false)
 					do me.undo.recordEnd()
 					do me.refreshCursor(false, true)
 					do \form@paintDrawEditor()
@@ -387,8 +354,9 @@ end func
 					do me.cursorY :- height / \common@cellHeight
 					do me.setAbsoluteX(absoluteX)
 					do me.refreshCursor(false, true)
-					do me.interpret1SetDirty(me.cursorY, false)
+					do me.interpret1SetDirty(me.cursorY, false, false)
 				end if
+				do \form@paintDrawEditor()
 				ret true
 			end block
 		case %pageDown
@@ -403,8 +371,9 @@ end func
 					do me.cursorY :+ height / \common@cellHeight
 					do me.setAbsoluteX(absoluteX)
 					do me.refreshCursor(false, true)
-					do me.interpret1SetDirty(me.cursorY, false)
+					do me.interpret1SetDirty(me.cursorY, false, false)
 				end if
+				do \form@paintDrawEditor()
 				ret true
 			end block
 		case %end_
@@ -414,7 +383,9 @@ end func
 				do me.cursorY :: lib@intMax
 			end if
 			do me.refreshCursor(false, true)
-			do me.interpret1SetDirty(me.cursorY, false)
+			do \completion@close()
+			do \form@paintDrawEditor()
+			do me.interpret1SetDirty(me.cursorY, false, false)
 			ret true
 		case %home
 			do me.setArea(shiftCtrl)
@@ -423,7 +394,9 @@ end func
 				do me.cursorY :: 0
 			end if
 			do me.refreshCursor(false, true)
-			do me.interpret1SetDirty(me.cursorY, false)
+			do \completion@close()
+			do \form@paintDrawEditor()
+			do me.interpret1SetDirty(me.cursorY, false, false)
 			ret true
 		case %left
 			if(shiftCtrl = %ctrl)
@@ -432,21 +405,25 @@ end func
 				do me.setArea(shiftCtrl)
 				do me.cursorX :- 1
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 			end if
+			do \completion@close()
+			do \form@paintDrawEditor()
 			ret true
 		case %up
 			if(shiftCtrl = %none & \completion@displayed() & \completion@moveCursorUp())
 				; Do nothing.
 			elif(shiftCtrl = %ctrl)
 				do me.scrollPageY(-1)
+				do \form@paintDrawEditor()
 			else
 				do me.setArea(shiftCtrl)
 				var absoluteX: int :: me.getAbsoluteX()
 				do me.cursorY :- 1
 				do me.setAbsoluteX(absoluteX)
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
+				do \form@paintDrawEditor()
 			end if
 			ret true
 		case %right
@@ -456,21 +433,25 @@ end func
 				do me.setArea(shiftCtrl)
 				do me.cursorX :+ 1
 				do me.refreshCursor(true, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 			end if
+			do \completion@close()
+			do \form@paintDrawEditor()
 			ret true
 		case %down
 			if(shiftCtrl = %none & \completion@displayed() & \completion@moveCursorDown())
 				; Do nothing.
 			elif(shiftCtrl = %ctrl)
 				do me.scrollPageY(1)
+				do \form@paintDrawEditor()
 			else
 				do me.setArea(shiftCtrl)
 				var absoluteX: int :: me.getAbsoluteX()
 				do me.cursorY :+ 1
 				do me.setAbsoluteX(absoluteX)
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
+				do \form@paintDrawEditor()
 			end if
 			ret true
 		case %ins
@@ -486,12 +467,10 @@ end func
 				do \completion@setAlpha(230)
 			end if
 		end switch
-		do \form@paintDrawEditor()
 	end func
 
 	+*func keyChar(key: char)
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		if(key = '\t' | me.charWidth(key, 0) = 0)
@@ -505,7 +484,7 @@ end func
 			do me.delAreaStr()
 		end if
 		do me.ins(me.cursorX, me.cursorY, [key], true)
-		do me.interpret1SetDirty(me.cursorY, true)
+		do me.interpret1SetDirty(me.cursorY, true, true)
 		do me.undo.recordEnd()
 		do me.refreshCursor(false, true)
 		do \form@paintDrawEditor()
@@ -536,8 +515,7 @@ end func
 	end func
 
 	+*func cmdUndo()
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		if(me.areaSel())
@@ -549,8 +527,7 @@ end func
 	end func
 
 	+*func cmdRedo()
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		if(me.areaSel())
@@ -562,15 +539,14 @@ end func
 	end func
 
 	+*func cmdCut()
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		if(me.areaSel())
 			do me.copyAreaStr()
 			do me.undo.recordBegin()
 			do me.delAreaStr()
-			do me.interpret1SetDirty(me.cursorY, true)
+			do me.interpret1SetDirty(me.cursorY, true, false)
 			do me.undo.recordEnd()
 			do me.refreshCursor(false, true)
 			do \form@paintDrawEditor()
@@ -584,8 +560,7 @@ end func
 	end func
 
 	+*func cmdPaste()
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		var str: []char :: wnd@getClipboardStr()
@@ -595,7 +570,7 @@ end func
 				do me.delAreaStr()
 			end if
 			do me.ins(me.cursorX, me.cursorY, str, true)
-			do me.interpret1SetDirty(me.cursorY, true)
+			do me.interpret1SetDirty(me.cursorY, true, false)
 			do me.undo.recordEnd()
 			do me.refreshCursor(false, true)
 			do \form@paintDrawEditor()
@@ -603,8 +578,7 @@ end func
 	end func
 
 	+*func cmdDel()
-		if (\form@getLockingEditor())
-			do \form@showMsgRunning()
+		if(me.locked())
 			ret
 		end if
 		do me.undo.recordBegin()
@@ -613,7 +587,7 @@ end func
 		else
 			do me.del(me.cursorX, me.cursorY, 1, true)
 		end if
-		do me.interpret1SetDirty(me.cursorY, true)
+		do me.interpret1SetDirty(me.cursorY, true, false)
 		do me.undo.recordEnd()
 		do me.refreshCursor(false, true)
 		do \form@paintDrawEditor()
@@ -625,7 +599,7 @@ end func
 		do me.cursorX :: lib@intMax
 		do me.cursorY :: lib@intMax
 		do me.refreshCursor(false, true)
-		do me.interpret1SetDirty(me.cursorY, false)
+		do me.interpret1SetDirty(me.cursorY, false, false)
 		do \form@paintDrawEditor()
 	end func
 
@@ -677,7 +651,136 @@ end func
 		ret str
 	end func
 
-	func setSrc(src: [][]char)
+	+*func getCursorWord(): []char
+		if(me.areaSel())
+			var x1: int :: me.areaX
+			var y1: int :: me.areaY
+			var x2: int :: me.cursorX
+			var y2: int :: me.cursorY
+			if(y1 > y2 | y1 = y2 & x1 > x2)
+				do x1 :$ x2
+				do y1 :$ y2
+			end if
+			if(y1 = y2)
+				ret me.src.src[y1].sub(x1, x2 - x1).trim()
+			else
+				ret me.src.src[y1].sub(x1, -1).trim()
+			end if
+		else
+			var x1: int :: me.cursorX
+			var x2: int :: x1
+			var y1: int :: me.cursorY
+			while loop(x1 > 0)
+				var c: char :: me.src.src[y1][x1 - 1]
+				if(!('a' <= c & c <= 'z' | 'A' <= c & c <= 'Z' | '0' <= c & c <= '9' | c = '@' | c = '_' | c = '\\'))
+					break loop
+				end if
+				do x1 :- 1
+			end while
+			while loop(x2 < ^me.src.src[y1])
+				var c: char :: me.src.src[y1][x2]
+				if(!('a' <= c & c <= 'z' | 'A' <= c & c <= 'Z' | '0' <= c & c <= '9' | c = '@' | c = '_' | c = '\\'))
+					break loop
+				end if
+				do x2 :+ 1
+			end while
+			ret x1 = x2 ?(null, me.src.src[y1].sub(x1, x2 - x1).trim())
+		end if
+	end func
+
+	+*func updateUi()
+		do \form@btnCode.setText(\common@langEn ?("Show Designer", "デザイナを表示"))
+		do \form@btnCode.setEnabled(false)
+
+		do \form@listLt.setVisible(true)
+		do \form@listLt.setRedraw(false)
+		do \form@listLt.clear()
+		do \form@listLt.style(%list_)
+		do \snippet@updateList(\form@listLt)
+		do \form@listLt.setRedraw(true)
+
+		do \form@treeLb.setVisible(true)
+		do \form@treeLb.setRedraw(false)
+		do \form@treeLb.clear()
+		do \form@treeLb.expand(true)
+		do \form@treeLb.setRedraw(true)
+
+		do \form@listLb.setVisible(false)
+
+		do \form@listRb.setVisible(true)
+		do \form@listRb.setRedraw(false)
+		do \form@listRb.clearAll()
+		do \form@listRb.addColumn(\common@langEn ?("Error", "エラー"))
+		do \form@listRb.adjustWidth()
+		do me.errList.sort()
+		do me.errList.head()
+		while(!me.errList.term())
+			do \form@listRb.add(me.errList.get().text, -1)
+			do me.errList.next()
+		end while
+		do \form@listRb.setRedraw(true)
+
+		do \form@groupRbAr.setVisible(false)
+	end func
+
+	+*func onEvent(event: \doc@Event)
+		switch(event)
+		case %listLtOnMouseClick
+			var sel: int :: \form@listLt.getSel()
+			if(sel = -1)
+				ret
+			end if
+			var code: []char :: \snippet@showPlace(\form@listLt.getText(&, sel, 0))
+			if(code =& null)
+				ret
+			end if
+			do me.undo.recordBegin()
+			if(me.areaSel())
+				do me.delAreaStr()
+			end if
+			do me.ins(me.cursorX, me.cursorY, code, true)
+			do me.interpret1SetDirty(me.cursorY, true, false)
+			do me.undo.recordEnd()
+			do me.refreshCursor(false, true)
+			do \form@paintDrawEditor()
+		case %listRbOnMouseClick
+			var sel: int :: \form@listRb.getSel()
+			if(sel <> -1 & sel < ^me.errList)
+				do me.errList.head()
+				var item: @ErrListItem :: me.errList.getOffset(sel)
+				do \src@jumpSrc(item.pos)
+			end if
+		end switch
+	end func
+
+	+*func getChanged(): bool
+		ret me.changed
+	end func
+
+	+func toggleBreakPoint()
+		if(0 <= me.cursorY & me.cursorY < ^me.src.flags)
+			if(me.src.flags[me.cursorY].and(%breakPoint) = %none)
+				do me.src.flags[me.cursorY] :: me.src.flags[me.cursorY].or(%breakPoint)
+			else
+				do me.src.flags[me.cursorY] :: me.src.flags[me.cursorY].and((%breakPoint $ LineFlag).not())
+			end if
+			do \form@paintDrawEditor()
+		end if
+	end func
+
+	+func setBreakPoint(y: int)
+		if(0 <= y & y < ^me.src.flags)
+			do me.src.flags[y] :: me.src.flags[y].or(%breakPoint)
+		end if
+	end func
+
+	+func unsetBreakPoint(y: int)
+		if(0 <= y & y < ^me.src.flags)
+			do me.src.flags[y] :: me.src.flags[y].and((%breakPoint $ LineFlag).not())
+		end if
+	end func
+
+	+func setSrc(src: [][]char)
 		if(src =& null | ^src = 0)
 			do me.src.src :: [""]
 			do me.src.color :: [#[0]bit8]
@@ -694,10 +797,6 @@ end func
 				do me.src.flags[i] :: %none
 			end for
 		end if
-	end func
-
-	+func getSrc(): [][]char
-		ret me.src.src
 	end func
 
 	+func findPrev(pattern: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool): bool
@@ -720,7 +819,7 @@ end func
 				do me.cursorX :: pos + ^found
 				do me.cursorY :: i
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 				do \form@paintDrawEditor()
 				ret true
 			end if
@@ -733,7 +832,7 @@ end func
 				do me.cursorX :: pos + ^found
 				do me.cursorY :: i
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 				do \form@paintDrawEditor()
 				ret true
 			end if
@@ -761,7 +860,7 @@ end func
 				do me.cursorX :: pos + ^found
 				do me.cursorY :: i
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 				do \form@paintDrawEditor()
 				ret true
 			end if
@@ -774,12 +873,73 @@ end func
 				do me.cursorX :: pos + ^found
 				do me.cursorY :: i
 				do me.refreshCursor(false, true)
-				do me.interpret1SetDirty(me.cursorY, false)
+				do me.interpret1SetDirty(me.cursorY, false, false)
 				do \form@paintDrawEditor()
 				ret true
 			end if
 		end for
 		ret false
+	end func
+
+	+func findSel(list_: wnd@List, poses: list<\src@Pos>, srcName: []char, pattern: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool)
+		if(!me.areaSel())
+			ret
+		end if
+		var areaX1: int :: me.cursorX
+		var areaY1: int :: me.cursorY
+		var areaX2: int :: me.areaX
+		var areaY2: int :: me.areaY
+		if(areaY1 > areaY2 | areaY1 = areaY2 & areaX1 > areaX2)
+			do areaX1 :$ areaX2
+			do areaY1 :$ areaY2
+		end if
+		do me.cursorX :: areaX1
+		do me.cursorY :: areaY1
+		do me.areaX :: -1
+		do me.areaY :: -1
+		while loop(true)
+			var oldX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var oldY: int :: me.cursorY
+			if(!me.findNext(pattern, distinguishCase, onlyWord, regularExpression))
+				break loop
+			end if
+			var newX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var newY: int :: me.cursorY
+			if(newY < oldY | newY = oldY & newX <= oldX | newY > areaY2 | newY = areaY2 & newX + ^pattern > areaX2)
+				break loop
+			end if
+			do list_.add("[" ~ srcName ~ ": " ~ (newY + 1).toStr() ~ ", " ~ (newX + 1).toStr() ~ "]")
+			var pos: \src@Pos :: #\src@Pos
+			do pos.src :: srcName
+			do pos.row :: newY + 1
+			do pos.col :: newX + 1
+			do poses.add(pos)
+		end while
+	end func
+
+	+func findAll(list_: wnd@List, poses: list<\src@Pos>, srcName: []char, pattern: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool)
+		do me.cursorX :: 0
+		do me.cursorY :: 0
+		do me.areaX :: -1
+		do me.areaY :: -1
+		while loop(true)
+			var oldX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var oldY: int :: me.cursorY
+			if(!me.findNext(pattern, distinguishCase, onlyWord, regularExpression))
+				break loop
+			end if
+			var newX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var newY: int :: me.cursorY
+			if(newY < oldY | newY = oldY & newX <= oldX)
+				break loop
+			end if
+			do list_.add("[" ~ srcName ~ ": " ~ (newY + 1).toStr() ~ ", " ~ (newX + 1).toStr() ~ "]")
+			var pos: \src@Pos :: #\src@Pos
+			do pos.src :: srcName
+			do pos.row :: newY + 1
+			do pos.col :: newX + 1
+			do poses.add(pos)
+		end while
 	end func
 
 	+func replaceOne(pattern: []char, replaceStr: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool)
@@ -807,9 +967,43 @@ end func
 			do me.undo.recordBegin()
 			do me.del(x1, me.cursorY, ^found, true)
 			do me.ins(x1, me.cursorY, replaceStr, true)
-			do me.interpret1SetDirty(me.cursorY, true)
+			do me.interpret1SetDirty(me.cursorY, true, false)
 			do me.undo.recordEnd()
 		end if
+	end func
+
+	+func replaceSel(pattern: []char, replaceStr: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool): int
+		if(!me.areaSel())
+			ret 0
+		end if
+		var areaX1: int :: me.cursorX
+		var areaY1: int :: me.cursorY
+		var areaX2: int :: me.areaX
+		var areaY2: int :: me.areaY
+		if(areaY1 > areaY2 | areaY1 = areaY2 & areaX1 > areaX2)
+			do areaX1 :$ areaX2
+			do areaY1 :$ areaY2
+		end if
+		do me.cursorX :: areaX1
+		do me.cursorY :: areaY1
+		do me.areaX :: -1
+		do me.areaY :: -1
+		var cnt: int :: 0
+		while loop(true)
+			var oldX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var oldY: int :: me.cursorY
+			if(!me.findNext(pattern, distinguishCase, onlyWord, regularExpression))
+				break loop
+			end if
+			var newX: int :: me.cursorX < me.areaX ?(me.cursorX, me.areaX)
+			var newY: int :: me.cursorY
+			if(newY < oldY | newY = oldY & newX <= oldX | newY > areaY2 | newY = areaY2 & newX + ^pattern > areaX2)
+				break loop
+			end if
+			do me.replaceOne(pattern, replaceStr, distinguishCase, onlyWord, regularExpression)
+			do cnt :+ 1
+		end while
+		ret cnt
 	end func
 
 	+func replaceAll(pattern: []char, replaceStr: []char, distinguishCase: bool, onlyWord: bool, regularExpression: bool): int
@@ -841,7 +1035,7 @@ end func
 		do me.areaX :: -1
 		do me.areaY :: -1
 		do me.refreshCursor(false, true)
-		do me.interpret1SetDirty(me.cursorY, false)
+		do me.interpret1SetDirty(me.cursorY, false, false)
 	end func
 
 	+func complementDecision(): bool
@@ -866,13 +1060,33 @@ end func
 		end if
 	end func
 
+	+func getBreakPoints(srcName: []char, poses: list<\src@Pos>)
+		for i(0, ^me.src.flags - 1)
+			if(me.src.flags[i].and(%breakPoint) <> %none)
+				var pos: \src@Pos :: #\src@Pos
+				do pos.src :: srcName
+				do pos.row :: i + 1
+				do pos.col :: 1
+				do poses.add(pos)
+			end if
+		end for
+	end func
+
+	+func setLock(enabled: bool)
+		do me.lock :: enabled
+	end func
+
 	const colorLineNum: int :: 0xFFFF7F7F
 	const colorAreaBack: int :: 0xFF808080
 	const colorErrBack: int :: 0xFFFF3333
+	const colorBreakPointBack: int :: 0xFFFF9999
+	const colorBreakPoint: int :: 0xFFFFFFFF
+	const colorBreakBack: int :: 0xFFCCCC99
 
 	enum LineFlag
 		none :: 0x00
 		nextLine :: 0x01
+		breakPoint :: 0x02
 	end enum
 
 	class Src()
@@ -919,6 +1133,10 @@ end func
 	+var errList: list<@ErrListItem>
 	var dirtyLine: int
 	var dirtyLineForce: bool
+	var caretX: int
+	var caretY: int
+	var caretShown: bool
+	var lock: bool
 
 	func areaSel(): bool
 		ret me.areaX <> -1 & (me.areaX <> me.cursorX | me.areaY <> me.cursorY)
@@ -954,6 +1172,9 @@ end func
 
 	func mousePosToCharPos(mouseX: int, mouseY: int)
 		do me.cursorY :: me.pageY + mouseY / \common@cellHeight
+		if(me.cursorY < 0)
+			do me.cursorY :: 0
+		end if
 		if(me.cursorY >= ^me.src.src)
 			do me.cursorX :: 0
 			ret
@@ -1061,11 +1282,17 @@ end func
 			do x :: me.lineNumWidth + (x - me.pageX) * \common@cellWidth
 			var y: int :: (me.cursorY - me.pageY) * \common@cellHeight
 			if(x + 2 <= 0 | scrWidth - 17 <= x | y + \common@cellHeight <= 0 | scrHeight - 17 <= y)
+				do me.caretX :: -1
+				do me.caretY :: -1
 				do \form@drawEditor.moveCaret(-1, -1)
 			else
+				do me.caretX :: x
+				do me.caretY :: y
 				do \form@drawEditor.moveCaret(x, y)
 			end if
 		end block
+
+		do \completion@updatePos()
 
 		func log10(n: int): int
 			var result: int :: 0
@@ -1187,7 +1414,7 @@ end func
 				do me.ins(0, i, "\t", true)
 			end if
 		end for
-		do me.interpret1SetDirty(y2, true)
+		do me.interpret1SetDirty(y2, true, false)
 		do me.undo.recordEnd()
 		do me.areaX :: oldAreaX
 		do me.areaY :: oldAreaY
@@ -1224,7 +1451,7 @@ end func
 				do me.del(0, i, 1, true)
 			end if
 		end for
-		do me.interpret1SetDirty(y2, true)
+		do me.interpret1SetDirty(y2, true, false)
 		do me.undo.recordEnd()
 		do me.areaX :: oldAreaX
 		do me.areaY :: oldAreaY
@@ -1397,7 +1624,7 @@ end func
 		ret x = ^me.src.src[y] ?(-1, x)
 	end func
 
-	func interpret1SetDirty(line: int, modified: bool)
+	func interpret1SetDirty(line: int, modified: bool, showCompletion: bool)
 		var record: bool :: !me.undo.recording()
 		if(record)
 			do me.undo.recordBegin()
@@ -1421,7 +1648,7 @@ end func
 
 				do \src@resetErrList()
 				try
-					do \dll@interpret2(\src@mainSrcName, \src@getSrc, null, \form@getEnv(), \form@logForInterpret, \common@langEn ?(1, 0))
+					do \dll@interpret2(\src@mainSrcPath, \src@getSrc, null, \form@getEnv(), \form@logForInterpret, \common@langEn ?(1, 0))
 				catch
 				end try
 				do \src@updateErrList()
@@ -1445,14 +1672,12 @@ end func
 			do me.undo.recordEnd()
 		end if
 
-		if(modified)
+		if(showCompletion & modified)
 			var first: int
 			var word: []char :: me.parseWord(me.cursorX, me.cursorY, &first)
-			if(word =& null)
-				do \completion@close()
-			else
-				do \completion@show(me.src, \src@curDocInternalName, first, me.cursorY, word)
-			end if
+			do \form@drawEditor.showCaret(\common@cellHeight, \common@font)
+			do \completion@show(me.src, \src@curDocName, first, me.cursorY, word)
+			do \form@drawEditor.hideCaret()
 		end if
 	end func
 
@@ -1462,7 +1687,7 @@ end func
 			do first :- 1
 		end while
 		if(first = ^me.src.color[y] | !keyword(me.src.color[y][first]))
-			do first :: -1
+			do first :: x
 			ret null
 		end if
 		var last: int :: x
@@ -1497,6 +1722,14 @@ end func
 		end if
 		do \completion@close()
 		ret true
+	end func
+
+	func locked(): bool
+		if(\form@getLockingEditor())
+			do \form@showMsgRunning()
+			ret true
+		end if
+		ret me.lock
 	end func
 end class
 

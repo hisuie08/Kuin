@@ -2,23 +2,22 @@
 	*func [d0000.knd, _processDtor, _force] _dtor()
 	end func
 
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
-	end func
-
 	+func [d0000.knd, _processRun] run(waitUntilExit: bool): int
+	end func
+
+	+func [d0000.knd, _processFin] fin()
+	end func
+
+	+func [d0000.knd, _processRunning] running(exitCode: &int): bool
+	end func
+
+	+func [d0000.knd, _processReadPipe] readPipe(): []char
 	end func
 
 	var processHandle: int
 	var threadHandle: int
+	var readPipeHandle: int
+	var writePipeHandle: int
 end class
 
 +func [d0000.knd, _makeProcess, _make_instance] makeProcess(me2: @Process, path: []char, cmdLine: []char): @Process
@@ -29,18 +28,6 @@ end func
 
 +class Thread()
 	*func [d0000.knd, _threadDtor, _force] _dtor()
-	end func
-
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
 	end func
 
 	+func [d0000.knd, _threadRun] run()
@@ -60,18 +47,6 @@ end func
 
 +class Mutex()
 	*func [d0000.knd, _mutexDtor, _force] _dtor()
-	end func
-
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
 	end func
 
 	+func [d0000.knd, _mutexLock] lock()

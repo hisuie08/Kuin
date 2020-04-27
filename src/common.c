@@ -21,33 +21,115 @@ typedef struct SFile
 	U64 Key;
 } SFile;
 
-void* Heap;
-S64* HeapCnt;
-S64 AppCode;
-const U8* UseResFlags;
-HINSTANCE Instance;
+SEnvVars EnvVars;
 
 #if !defined(DBG)
 static SFile* OpenPackFile(const Char* path);
 #endif
 static U8 GetKey(U64 key, U8 data, U64 pos);
 
+Bool InitEnvVars(void* heap, S64* heap_cnt, S64 app_code, const U8* use_res_flags)
+{
+	if (EnvVars.Heap != NULL)
+		return False;
+
+	EnvVars.Heap = heap;
+#if defined(_DEBUG)
+	EnvVars.HeapCnt = heap_cnt;
+#else
+	UNUSED(heap_cnt);
+#endif
+	EnvVars.AppCode = app_code;
+	EnvVars.UseResFlags = use_res_flags;
+
+	// The resource root directory.
+#if defined(DBG)
+	{
+		Char cur_dir_path[KUIN_MAX_PATH + 12 + 1];
+		GetModuleFileName(NULL, cur_dir_path, KUIN_MAX_PATH);
+		{
+			Char* ptr = wcsrchr(cur_dir_path, L'\\');
+			if (ptr != NULL)
+				*(ptr + 1) = L'\0';
+		}
+		wcscat(cur_dir_path, L"_curdir_.txt");
+		if (PathFileExists(cur_dir_path))
+		{
+			Char path[KUIN_MAX_PATH + 1];
+			FILE* file_ptr = _wfopen(cur_dir_path, L"r, ccs=UTF-8");
+			fgetws(path, KUIN_MAX_PATH, file_ptr);
+			{
+				Char* ptr = path;
+				while (ptr[1] != L'\0')
+					ptr++;
+				while (ptr >= path && (*ptr == L'\n' || *ptr == L'\r'))
+				{
+					*ptr = L'\0';
+					ptr--;
+				}
+			}
+			wcscpy(EnvVars.ResRoot, path);
+		}
+		else
+		{
+			Char* ptr;
+			GetModuleFileName(NULL, EnvVars.ResRoot, KUIN_MAX_PATH);
+			ptr = wcsrchr(EnvVars.ResRoot, L'\\');
+			if (ptr != NULL)
+				*(ptr + 1) = L'\0';
+			ptr = EnvVars.ResRoot;
+			while (*ptr != L'\0')
+			{
+				if (*ptr == L'\\')
+					*ptr = L'/';
+				ptr++;
+			}
+		}
+	}
+#else
+	{
+		Char* ptr;
+		GetModuleFileName(NULL, EnvVars.ResRoot, KUIN_MAX_PATH);
+		ptr = wcsrchr(EnvVars.ResRoot, L'\\');
+		if (ptr != NULL)
+			*(ptr + 1) = L'\0';
+		ptr = EnvVars.ResRoot;
+		while (*ptr != L'\0')
+		{
+			if (*ptr == L'\\')
+				*ptr = L'/';
+			ptr++;
+		}
+	}
+#endif
+
+	return True;
+}
+
 void* AllocMem(size_t size)
 {
-	void* result = HeapAlloc(Heap, HEAP_GENERATE_EXCEPTIONS, (SIZE_T)size);
+	void* result = HeapAlloc(EnvVars.Heap, HEAP_GENERATE_EXCEPTIONS, (SIZE_T)size);
 #if defined(_DEBUG)
 	memset(result, 0xcd, size);
-	(*HeapCnt)++;
+	(*EnvVars.HeapCnt)++;
 #endif
 	return result;
 }
 
+void* ReAllocMem(void* ptr, size_t size)
+{
+	if (ptr == NULL)
+		return HeapAlloc(EnvVars.Heap, HEAP_GENERATE_EXCEPTIONS, (SIZE_T)size);
+	else
+		return HeapReAlloc(EnvVars.Heap, HEAP_GENERATE_EXCEPTIONS, ptr, (SIZE_T)size);
+}
+
 void FreeMem(void* ptr)
 {
-	HeapFree(Heap, 0, ptr);
+	HeapFree(EnvVars.Heap, 0, ptr);
 #if defined(_DEBUG)
-	(*HeapCnt)--;
-	ASSERT(*HeapCnt >= 0);
+	(*EnvVars.HeapCnt)--;
+	ASSERT(*EnvVars.HeapCnt >= 0);
 #endif
 }
 
@@ -59,7 +141,7 @@ void ThrowImpl(U32 code)
 void* LoadFileAll(const Char* path, size_t* size)
 {
 #if !defined(DBG)
-	if (path[0] == L'r' || path[1] == L'e' || path[2] == L's' || path[3] == L'/')
+	if (path[0] == L'r' && path[1] == L'e' && path[2] == L's' && path[3] == L'/')
 	{
 		SFile* handle = OpenPackFile(path + 4);
 		if (handle == NULL)
@@ -82,7 +164,20 @@ void* LoadFileAll(const Char* path, size_t* size)
 	else
 #endif
 	{
+#if defined(DBG)
+		FILE* file_ptr;
+		if (path[0] == L'r' && path[1] == L'e' && path[2] == L's' && path[3] == L'/')
+		{
+			Char path2[KUIN_MAX_PATH * 2 + 1];
+			wcscpy(path2, EnvVars.ResRoot);
+			wcscat(path2, path);
+			file_ptr = _wfopen(path2, L"rb");
+		}
+		else
+			file_ptr = _wfopen(path, L"rb");
+#else
 		FILE* file_ptr = _wfopen(path, L"rb");
+#endif
 		if (file_ptr == NULL)
 			return NULL;
 		_fseeki64(file_ptr, 0, SEEK_END);
@@ -103,7 +198,7 @@ void* LoadFileAll(const Char* path, size_t* size)
 void* OpenFileStream(const Char* path)
 {
 #if !defined(DBG)
-	if (path[0] == L'r' || path[1] == L'e' || path[2] == L's' || path[3] == L'/')
+	if (path[0] == L'r' && path[1] == L'e' && path[2] == L's' && path[3] == L'/')
 	{
 		SFile* handle = OpenPackFile(path + 4);
 		if (handle == NULL)
@@ -113,7 +208,20 @@ void* OpenFileStream(const Char* path)
 	else
 #endif
 	{
+#if defined(DBG)
+		FILE* file_ptr;
+		if (path[0] == L'r' && path[1] == L'e' && path[2] == L's' && path[3] == L'/')
+		{
+			Char path2[KUIN_MAX_PATH * 2 + 1];
+			wcscpy(path2, EnvVars.ResRoot);
+			wcscat(path2, path);
+			file_ptr = _wfopen(path2, L"rb");
+	}
+		else
+			file_ptr = _wfopen(path, L"rb");
+#else
 		FILE* file_ptr = _wfopen(path, L"rb");
+#endif
 		if (file_ptr == NULL)
 			return NULL;
 		{
@@ -253,6 +361,11 @@ Bool IsPowerOf2(U64 n)
 	return (n & (n - 1)) == 0;
 }
 
+U32 MakeSeed(U32 key)
+{
+	return (U32)(time(NULL)) ^ (U32)timeGetTime() ^ key;
+}
+
 U32 XorShift(U32* seed)
 {
 	U32 x = *seed;
@@ -261,6 +374,35 @@ U32 XorShift(U32* seed)
 	x ^= x << 5;
 	*seed = x;
 	return x;
+}
+
+U64 XorShift64(U32* seed)
+{
+	U32 a = XorShift(seed);
+	U32 b = XorShift(seed);
+	return ((U64)a << 32) | (U64)b;
+}
+
+S64 XorShiftInt(U32* seed, S64 min, S64 max)
+{
+	U64 n = (U64)(max - min + 1);
+	U64 m = 0 - ((0 - n) % n);
+	U64 r;
+	if (m == 0)
+		r = XorShift64(seed);
+	else
+	{
+		do
+		{
+			r = XorShift64(seed);
+		} while (m <= r);
+	}
+	return (S64)(r % n) + min;
+}
+
+double XorShiftFloat(U32* seed, double min, double max)
+{
+	return (double)(XorShift64(seed)) / 18446744073709551616.0 * (max - min) + min;
 }
 
 char* Utf16ToUtf8(const U8* str)
@@ -302,15 +444,21 @@ Bool IsResUsed(EUseResFlagsKind kind)
 {
 	S64 idx = (S64)kind;
 	ASSERT(1 <= idx && (idx - 1) / 8 < USE_RES_FLAGS_LEN);
-	return (UseResFlags[(idx - 1) / 8] & (1 << ((idx - 1) % 8))) != 0;
+	return (EnvVars.UseResFlags[(idx - 1) / 8] & (1 << ((idx - 1) % 8))) != 0;
 }
 
 #if !defined(DBG)
 static SFile* OpenPackFile(const Char* path)
 {
-	FILE* file_ptr = _wfopen(L"res.knd", L"rb");
-	if (file_ptr == NULL)
-		return NULL;
+	FILE* file_ptr;
+	{
+		Char path2[KUIN_MAX_PATH + 1];
+		wcscpy(path2, EnvVars.ResRoot);
+		wcscat(path2, L"res.knd");
+		file_ptr = _wfopen(path2, L"rb");
+		if (file_ptr == NULL)
+			return NULL;
+	}
 	SFile* handle = (SFile*)AllocMem(sizeof(SFile));
 	handle->Pack = True;
 	handle->Handle = file_ptr;
@@ -321,7 +469,7 @@ static SFile* OpenPackFile(const Char* path)
 	U64 len;
 	{
 		fread(&key, sizeof(U64), 1, file_ptr);
-		key ^= (U64)AppCode * 0x9271ac8394027acb + 0x35718394ca72849e;
+		key ^= (U64)EnvVars.AppCode * 0x9271ac8394027acb + 0x35718394ca72849e;
 		handle->Key = key;
 	}
 	{

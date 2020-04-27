@@ -1,7 +1,5 @@
 +class Doc()
 	*func ctor()
-		do me.undo :: #undo@Undo
-		do me.undo.init(1024)
 		do me.changed :: false
 	end func
 
@@ -9,7 +7,7 @@
 		do me.undo :: null
 	end func
 
-	+func update()
+	+func fix()
 	end func
 
 	+func load(path: []char): bool
@@ -18,34 +16,10 @@
 	+func save(path: []char): bool
 	end func
 
+	+func getSrc(): [][]char
+	end func
+
 	+func draw(width: int, height: int)
-	end func
-
-	+func updateProp(listView: wnd@ListView)
-	end func
-
-	+func updateTree(tree: wnd@TreeMulti)
-	end func
-
-	+func updateList(list_: wnd@List)
-	end func
-
-	+func treeItemOnSel()
-	end func
-
-	+func treeItemOnMoveNode()
-	end func
-
-	+func listObjOnSel()
-	end func
-
-	+func listPropOnSel(listView: wnd@ListView)
-	end func
-
-	+func listPropOnMouseClick(listView: wnd@ListView)
-	end func
-
-	+func listPropOnMouseDoubleClick(listView: wnd@ListView)
 	end func
 
 	+func mouseDownL(x: int, y: int)
@@ -61,6 +35,9 @@
 	end func
 
 	+func focus(isFocus: bool)
+	end func
+
+	+func updateScrollBar()
 	end func
 
 	+func keyDown(key: wnd@Key, shiftCtrl: wnd@ShiftCtrl): bool
@@ -114,9 +91,41 @@
 	+func getSelCode(): []char
 	end func
 
-	+var changed: bool
+	+func getCursorWord(): []char
+		ret null
+	end func
+
+	+func updateUi()
+	end func
+
+	+func onEvent(event: @Event)
+	end func
+
+	+func getChanged(): bool
+		ret me.changed
+	end func
+
+	+func setChanged(value: bool)
+		do me.changed :: value
+	end func
+
+	var changed: bool
 	var undo: undo@Undo
 end class
+
++enum Event
+	listLtOnMouseClick
+	listLbOnMouseClick
+	listLbOnMoveNode
+	listRbOnMouseClick
+	editRbArNameOnKillFocus
+	chkRbArVisibleOnPush
+	editRbArXOnKillFocus
+	editRbArYOnKillFocus
+	editRbArWidthOnKillFocus
+	editRbArHeightOnKillFocus
+	btnRbArPropOnPush
+end enum
 
 +class UndoCmd(undo@Cmd)
 	+var doc: @Doc

@@ -34,6 +34,14 @@ typedef struct SBinList
 	struct SBinList* Next;
 } SBinList;
 
+typedef struct SListPtr
+{
+	SClass Class;
+	void* Ptr;
+} SListPtr;
+
+extern Char ResRoot[KUIN_MAX_PATH + 1];
+
 static Bool IsRef(U8 type);
 static size_t GetSize(U8 type);
 static S64 Add(S64 a, S64 b);
@@ -46,6 +54,11 @@ static Bool IsStr(const U8* type);
 static Bool IsSpace(Char c);
 static void Copy(void* dst, U8 type, const void* src);
 static void* AddDictRecursion(void* node, const void* key, const void* item, int cmp_func(const void* a, const void* b), U8* key_type, U8* item_type, Bool* addition);
+static void* DelDictRecursion(void* node, const void* key, int cmp_func(const void* a, const void* b), U8* key_type, U8* item_type, Bool* deleted, Bool* balanced);
+static void* DelDictBalanceLeftRecursion(void* node, Bool* balanced);
+static void* DelDictBalanceRightRecursion(void* node, Bool* balanced);
+static void* DictRotateLeft(void* node);
+static void* DictRotateRight(void* node);
 static void* CopyDictRecursion(void* node, U8* key_type, U8* item_type);
 static void ToBinDictRecursion(void*** buf, void* node, U8* key_type, U8* item_type);
 static void* FromBinDictRecursion(const U8* key_type, const U8* item_type, const U8* bin, S64* idx, const void* type_class);
@@ -75,43 +88,11 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 
 EXPORT void _init(void* heap, S64* heap_cnt, S64 app_code, const U8* use_res_flags)
 {
-	Heap = heap;
-	HeapCnt = heap_cnt;
-	AppCode = app_code;
-	UseResFlags = use_res_flags;
-	Instance = (HINSTANCE)GetModuleHandle(NULL);
+	if (!InitEnvVars(heap, heap_cnt, app_code, use_res_flags))
+		return;
 
-	// Set the current directory.
-	{
-		Char path[KUIN_MAX_PATH + 1];
-		Char* ptr;
-		GetModuleFileName(NULL, path, KUIN_MAX_PATH);
-		ptr = wcsrchr(path, L'\\');
-		if (ptr != NULL)
-			*(ptr + 1) = L'\0';
-		SetCurrentDirectory(path);
-	}
 #if defined(DBG)
-	{
-		const Char* cur_dir_path = L"./_curdir_.txt";
-		if (PathFileExists(cur_dir_path))
-		{
-			Char path[KUIN_MAX_PATH + 1];
-			FILE* file_ptr = _wfopen(cur_dir_path, L"r, ccs=UTF-8");
-			fgetws(path, KUIN_MAX_PATH, file_ptr);
-			{
-				Char* ptr = path;
-				while (ptr[1] != L'\0')
-					ptr++;
-				while (ptr >= path && (*ptr == L'\n' || *ptr == L'\r'))
-				{
-					*ptr = L'\0';
-					ptr--;
-				}
-			}
-			SetCurrentDirectory(path);
-		}
-	}
+	SetCurrentDirectory(EnvVars.ResRoot);
 #endif
 
 	// Initialize the COM library and the timer.
@@ -145,27 +126,29 @@ EXPORT void _err(S64 excpt)
 	{
 		switch (excpt)
 		{
-			case 0xc0000005: text = L"Access violation."; break;
+			case EXCPT_ACCESS_VIOLATION: text = L"Access violation."; break;
 			case 0xc0000017: text = L"No memory."; break;
 			case 0xc0000090: text = L"Float invalid operation."; break;
 			case 0xc0000094: text = L"Integer division by zero."; break;
 			case 0xc00000fd: text = L"Stack overflow."; break;
 			case 0xc000013a: text = L"Ctrl-C exit."; break;
-			case 0xe9170000: text = L"Assertion failed."; break;
-			case 0xe9170001: text = L"Class cast failed."; break;
-			case 0xe9170002: text = L"Array index out of range."; break;
-			case 0xe9170003: text = L"Integer overflow."; break;
-			case 0xe9170004: text = L"Invalid comparison."; break;
+			case EXCPT_DBG_ASSERT_FAILED: text = L"Assertion failed."; break;
+			case EXCPT_CLASS_CAST_FAILED: text = L"Class cast failed."; break;
+			case EXCPT_DBG_ARRAY_IDX_OUT_OF_RANGE: text = L"Array index out of range."; break;
+			case EXCPT_DBG_INT_OVERFLOW: text = L"Integer overflow."; break;
+			case EXCPT_INVALID_CMP: text = L"Invalid comparison."; break;
 			case 0xe9170005: text = L"Invalid operation on standard library class."; break;
-			case 0xe9170006: text = L"Argument outside the domain."; break;
-			case 0xe9170007: text = L"File reading failed."; break;
-			case 0xe9170008: text = L"Invalid data format."; break;
-			case 0xe9170009: text = L"Device initialization failed."; break;
-			case 0xe917000a: text = L"Inoperable state."; break;
+			case EXCPT_DBG_ARG_OUT_DOMAIN: text = L"Argument outside the domain."; break;
+			case EXCPT_FILE_READ_FAILED: text = L"File reading failed."; break;
+			case EXCPT_INVALID_DATA_FMT: text = L"Invalid data format."; break;
+			case EXCPT_DEVICE_INIT_FAILED: text = L"Device initialization failed."; break;
+			case EXCPT_DBG_INOPERABLE_STATE: text = L"Inoperable state."; break;
 }
 	}
 	swprintf(str, 1024, L"An exception '0x%08X' occurred.\r\n\r\n> %s", (U32)excpt, text);
 	MessageBox(0, str, NULL, 0);
+#else
+	UNUSED(excpt);
 #endif
 }
 
@@ -602,7 +585,8 @@ EXPORT void* _toBin(const void* me_, const U8* type)
 					S64 len = *(S64*)((U8*)me_ + 0x08);
 					void** bins = (void**)AllocMem(sizeof(void*) * (size_t)len * 3); // 'key' + 'value' + 'info' per node.
 					void** ptr = bins;
-					ToBinDictRecursion(&ptr, *(void**)((U8*)me_ + 0x10), child1, child2);
+					if (len != 0)
+						ToBinDictRecursion(&ptr, *(void**)((U8*)me_ + 0x10), child1, child2);
 					return CatBin((int)len * 3, bins);
 				}
 			}
@@ -848,7 +832,7 @@ EXPORT void* _fromBin(const U8* me_, const void** type, S64* idx)
 		default:
 			ASSERT(*type2 == TypeId_Class);
 			if (*(S64*)(me_ + 0x10 + *idx) != 0)
-				THROW(0xc0000005); // TODO: What is this code?
+				THROW(EXCPT_ACCESS_VIOLATION); // TODO: What is this code?
 			*idx += 8;
 			{
 				const void** type3 = (const void**)type[1];
@@ -872,16 +856,20 @@ EXPORT S64 _powInt(S64 n, S64 m)
 		default:
 			if (m < 0)
 			{
-				THROWDBG(n == 0, 0xe9170003);
+				THROWDBG(n == 0, EXCPT_DBG_INT_OVERFLOW);
 				return n == 1 ? 1 : 0;
 			}
+			if (m == 0)
+				return 1;
 			{
 				S64 result = 1;
-				while (m != 0)
+				for (; ; )
 				{
 					if ((m & 1) == 1)
 						result = Mul(result, n);
 					m >>= 1;
+					if (m == 0)
+						break;
 					n = Mul(n, n);
 				}
 				return result;
@@ -907,7 +895,7 @@ EXPORT S64 _cmpStr(const U8* a, const U8* b)
 
 EXPORT void* _newArray(S64 len, S64* nums, const U8* type)
 {
-	THROWDBG(*nums < 0, 0xe9170002);
+	THROWDBG(*nums < 0, EXCPT_DBG_ARRAY_IDX_OUT_OF_RANGE);
 	{
 		size_t size = len == 1 ? GetSize(*type) : 8;
 		Bool is_str = len == 1 && *type == TypeId_Char;
@@ -938,7 +926,7 @@ EXPORT U8* _toStr(const void* me_, const U8* type)
 	switch (*type)
 	{
 		case TypeId_Int: len = swprintf(str, 33, L"%I64d", *(S64*)&me_); break;
-		case TypeId_Float: len = swprintf(str, 33, L"%g", *(double*)&me_); break;
+		case TypeId_Float: len = swprintf(str, 33, L"%.16g", *(double*)&me_); break;
 		case TypeId_Char:
 			len = 1;
 			str[0] = *(Char*)&me_;
@@ -965,6 +953,7 @@ EXPORT U8* _toStr(const void* me_, const U8* type)
 			return (U8*)me_;
 			break;
 		default:
+			len = 0;
 			ASSERT(False);
 			break;
 	}
@@ -980,7 +969,7 @@ EXPORT U8* _toStr(const void* me_, const U8* type)
 
 EXPORT U8* _toStrFmtInt(S64 me_, const U8* fmt)
 {
-	THROWDBG(fmt == NULL, 0xc0000005);
+	THROWDBG(fmt == NULL, EXCPT_ACCESS_VIOLATION);
 	const Char* fmt2 = (const Char*)(fmt + 0x10);
 	int src_len = (int)((S64*)fmt)[1];
 	Char dst[33];
@@ -1049,7 +1038,7 @@ EXPORT U8* _toStrFmtInt(S64 me_, const U8* fmt)
 
 EXPORT U8* _toStrFmtFloat(double me_, const U8* fmt)
 {
-	THROWDBG(fmt == NULL, 0xc0000005);
+	THROWDBG(fmt == NULL, EXCPT_ACCESS_VIOLATION);
 	const Char* fmt2 = (const Char*)(fmt + 0x10);
 	int src_len = (int)((S64*)fmt)[1];
 	Char dst[33];
@@ -1155,7 +1144,7 @@ EXPORT double _signFloat(double me_)
 
 EXPORT S64 _clampInt(S64 me_, S64 min, S64 max)
 {
-	THROWDBG(min > max, 0xe9170006);
+	THROWDBG(min > max, EXCPT_DBG_ARG_OUT_DOMAIN);
 	if (me_ < min)
 		return min;
 	if (me_ > max)
@@ -1165,7 +1154,7 @@ EXPORT S64 _clampInt(S64 me_, S64 min, S64 max)
 
 EXPORT double _clampFloat(double me_, double min, double max)
 {
-	THROWDBG(min > max, 0xe9170006);
+	THROWDBG(min > max, EXCPT_DBG_ARG_OUT_DOMAIN);
 	if (me_ < min)
 		return min;
 	if (me_ > max)
@@ -1318,11 +1307,11 @@ EXPORT S64 _endian(const void* me_, const U8* type)
 
 EXPORT void* _sub(const void* me_, const U8* type, S64 start, S64 len)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len2 = *(S64*)((U8*)me_ + 0x08);
 	if (len == -1)
 		len = len2 - start;
-	THROWDBG(start < 0 || len < 0 || start + len > len2, 0xe9170002);
+	THROWDBG(start < 0 || len < 0 || start + len > len2, EXCPT_DBG_ARRAY_IDX_OUT_OF_RANGE);
 	{
 		Bool is_str = IsStr(type);
 		size_t size = GetSize(type[1]);
@@ -1350,7 +1339,7 @@ EXPORT void* _sub(const void* me_, const U8* type, S64 start, S64 len)
 
 EXPORT void _reverse(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	U8* a = (U8*)me_ + 0x10;
@@ -1369,7 +1358,7 @@ EXPORT void _reverse(void* me_, const U8* type)
 
 EXPORT void _shuffle(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	U8* a = (U8*)me_ + 0x10;
@@ -1391,42 +1380,42 @@ EXPORT void _shuffle(void* me_, const U8* type)
 
 EXPORT void _sortArray(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	MergeSortArray(me_, type, True);
 }
 
 EXPORT void _sortDescArray(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	MergeSortArray(me_, type, False);
 }
 
 EXPORT void _sortList(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	MergeSortList(me_, type, True);
 }
 
 EXPORT void _sortDescList(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	MergeSortList(me_, type, False);
 }
 
 EXPORT S64 _findArray(const void* me_, const U8* type, const void* item, S64 start)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
-	U8* ptr = (U8*)me_ + 0x10;
-	S64 i;
 	if (start < -1 || len <= start)
 		return -1;
 	if (start == -1)
 		start = 0;
+	U8* ptr = (U8*)me_ + 0x10 + size * start;
+	S64 i;
 	for (i = start; i < len; i++)
 	{
 		void* value = NULL;
@@ -1440,11 +1429,11 @@ EXPORT S64 _findArray(const void* me_, const U8* type, const void* item, S64 sta
 
 EXPORT Bool _findList(const void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	for (; ; )
 	{
 		void* cur = *(void**)((U8*)me_ + 0x20);
@@ -1461,18 +1450,18 @@ EXPORT Bool _findList(const void* me_, const U8* type, const void* item)
 
 EXPORT S64 _findLastArray(const void* me_, const U8* type, const void* item, S64 start)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
-	U8* ptr = (U8*)me_ + 0x10 + size * (size_t)(len - 1);
-	S64 i;
 	if (start < -1 || len <= start)
 		return -1;
 	if (start == -1)
 		start = len - 1;
+	U8* ptr = (U8*)me_ + 0x10 + size * start;
+	S64 i;
 	for (i = start; i >= 0; i--)
 	{
 		void* value = NULL;
@@ -1486,11 +1475,11 @@ EXPORT S64 _findLastArray(const void* me_, const U8* type, const void* item, S64
 
 EXPORT Bool _findLastList(const void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	for (; ; )
 	{
 		void* cur = *(void**)((U8*)me_ + 0x20);
@@ -1507,11 +1496,11 @@ EXPORT Bool _findLastList(const void* me_, const U8* type, const void* item)
 
 EXPORT S64 _findBin(const void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	{
 		S64 len = *(S64*)((U8*)me_ + 0x08);
 		U8* ptr = (U8*)me_ + 0x10;
@@ -1537,7 +1526,7 @@ EXPORT S64 _findBin(const void* me_, const U8* type, const void* item)
 
 EXPORT void _fill(void* me_, const U8* type, const void* value)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	U8* ptr = (U8*)me_ + 0x10;
@@ -1573,11 +1562,11 @@ EXPORT void _fill(void* me_, const U8* type, const void* value)
 
 EXPORT void* _min(const void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	U8* ptr = (U8*)me_ + 0x10;
 	void* item = NULL;
@@ -1597,11 +1586,11 @@ EXPORT void* _min(const void* me_, const U8* type)
 
 EXPORT void* _max(const void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	U8* ptr = (U8*)me_ + 0x10;
 	void* item = NULL;
@@ -1621,7 +1610,7 @@ EXPORT void* _max(const void* me_, const U8* type)
 
 EXPORT void* _repeat(const void* me_, const U8* type, S64 len)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	Bool is_str = type[1] == TypeId_Char;
 	size_t len2 = ((const S64*)me_)[1];
@@ -1655,25 +1644,46 @@ EXPORT void* _repeat(const void* me_, const U8* type, S64 len)
 	return result;
 }
 
-EXPORT Bool _toInt(const U8* me_, S64* value)
+EXPORT S64 _toInt(const U8* me_, Bool* success)
 {
 	Char* ptr;
-	THROWDBG(me_ == NULL, 0xc0000005);
-	*value = wcstoll((const Char*)(me_ + 0x10), &ptr, 10);
-	return *ptr == L'\0';
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	const Char* str = (const Char*)(me_ + 0x10);
+	S64 value;
+	if (str[0] == '0' && str[1] == 'x')
+		value = wcstoll(str + 2, &ptr, 16);
+	else
+		value = wcstoll(str, &ptr, 10);
+	*success = *ptr == L'\0';
+	return value;
 }
 
-EXPORT Bool _toFloat(const U8* me_, double* value)
+EXPORT double _toFloat(const U8* me_, Bool* success)
 {
 	Char* ptr;
-	THROWDBG(me_ == NULL, 0xc0000005);
-	*value = wcstod((const Char*)(me_ + 0x10), &ptr);
-	return *ptr == L'\0';
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	double value = wcstod((const Char*)(me_ + 0x10), &ptr);
+	*success = *ptr == L'\0';
+	return value;
+}
+
+EXPORT U64 _toBit64(const U8* me_, Bool* success)
+{
+	Char* ptr;
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	const Char* str = (const Char*)(me_ + 0x10);
+	U64 value;
+	if (str[0] == '0' && str[1] == 'x')
+		value = wcstoull(str + 2, &ptr, 16);
+	else
+		value = wcstoull(str, &ptr, 10);
+	*success = *ptr == L'\0';
+	return value;
 }
 
 EXPORT void* _lower(const U8* me_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *(S64*)(me_ + 0x08);
 	U8* result = (U8*)AllocMem(0x10 + sizeof(Char) * (size_t)(len + 1));
 	((S64*)result)[0] = DefaultRefCntFunc;
@@ -1698,7 +1708,7 @@ EXPORT void* _lower(const U8* me_)
 
 EXPORT void* _upper(const U8* me_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *(S64*)(me_ + 0x08);
 	U8* result = (U8*)AllocMem(0x10 + sizeof(Char) * (size_t)(len + 1));
 	((S64*)result)[0] = DefaultRefCntFunc;
@@ -1723,7 +1733,7 @@ EXPORT void* _upper(const U8* me_)
 
 EXPORT void* _trim(const U8* me_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *(S64*)(me_ + 0x08);
 	const Char* first = (Char*)(me_ + 0x10);
 	const Char* last = first + len - 1;
@@ -1750,7 +1760,7 @@ EXPORT void* _trim(const U8* me_)
 
 EXPORT void* _trimLeft(const U8* me_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *(S64*)(me_ + 0x08);
 	const Char* first = (Char*)(me_ + 0x10);
 	while (len > 0 && IsSpace(*first))
@@ -1770,7 +1780,7 @@ EXPORT void* _trimLeft(const U8* me_)
 
 EXPORT void* _trimRight(const U8* me_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *(S64*)(me_ + 0x08);
 	const Char* last = (Char*)(me_ + 0x10) + len - 1;
 	while (len > 0 && IsSpace(*last))
@@ -1790,8 +1800,8 @@ EXPORT void* _trimRight(const U8* me_)
 
 EXPORT void* _split(const U8* me_, const U8* delimiter)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(delimiter == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(delimiter == NULL, EXCPT_ACCESS_VIOLATION);
 	SBinList* top = NULL;
 	SBinList* bottom = NULL;
 	size_t len = 0;
@@ -1856,10 +1866,18 @@ EXPORT void* _split(const U8* me_, const U8* delimiter)
 
 EXPORT void* _join(const U8* me_, const U8* delimiter)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(delimiter == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(delimiter == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 delimiter_len = *(const S64*)(delimiter + 0x08);
 	S64 array_len = *(const S64*)(me_ + 0x08);
+	if (array_len == 0)
+	{
+		U8* blank = (U8*)AllocMem(0x10 + sizeof(Char));
+		((S64*)blank)[0] = DefaultRefCntFunc;
+		((S64*)blank)[1] = 0;
+		*(Char*)(blank + 0x10) = L'\0';
+		return blank;
+	}
 	const void** array_ = (const void**)(me_ + 0x10);
 	S64 total_len = delimiter_len * (array_len - 1);
 	U8* result;
@@ -1895,9 +1913,9 @@ EXPORT void* _join(const U8* me_, const U8* delimiter)
 
 EXPORT void* _replace(const U8* me_, const U8* old, const U8* new_)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(old == NULL, 0xc0000005);
-	THROWDBG(new_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(old == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(new_ == NULL, EXCPT_ACCESS_VIOLATION);
 	SBinList* top = NULL;
 	SBinList* bottom = NULL;
 	size_t len = 0;
@@ -1966,8 +1984,8 @@ EXPORT void* _replace(const U8* me_, const U8* old, const U8* new_)
 
 EXPORT S64 _findStr(const U8* me_, const U8* pattern, S64 start)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(pattern == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(pattern == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len1 = ((const S64*)me_)[1];
 	if (start < -1 || len1 <= start)
 		return -1;
@@ -1979,8 +1997,8 @@ EXPORT S64 _findStr(const U8* me_, const U8* pattern, S64 start)
 
 EXPORT S64 _findStrLast(const U8* me_, const U8* pattern, S64 start)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(pattern == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(pattern == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len1 = ((const S64*)me_)[1];
 	S64 len2 = ((const S64*)pattern)[1];
 	const Char* ptr1 = (const Char*)(me_ + 0x10);
@@ -2000,8 +2018,8 @@ EXPORT S64 _findStrLast(const U8* me_, const U8* pattern, S64 start)
 
 EXPORT S64 _findStrEx(const U8* me_, const U8* pattern, S64 start, Bool fromLast, Bool ignoreCase, Bool wholeWord)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(pattern == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(pattern == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len1 = ((const S64*)me_)[1];
 	S64 len2 = ((const S64*)pattern)[1];
 	const Char* ptr1 = (const Char*)(me_ + 0x10);
@@ -2069,7 +2087,7 @@ EXPORT S64 _findStrEx(const U8* me_, const U8* pattern, S64 start, Bool fromLast
 
 EXPORT void _addList(void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* node = (U8*)AllocMem(0x10 + GetSize(type[1]));
 	Copy(node + 0x10, type[1], &item);
 	*(void**)(node + 0x08) = NULL;
@@ -2090,7 +2108,7 @@ EXPORT void _addList(void* me_, const U8* type, const void* item)
 
 EXPORT void _addStack(void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* node = (U8*)AllocMem(0x08 + GetSize(type[1]));
 	Copy(node + 0x08, type[1], &item);
 	*(void**)node = *(void**)((U8*)me_ + 0x10);
@@ -2100,7 +2118,7 @@ EXPORT void _addStack(void* me_, const U8* type, const void* item)
 
 EXPORT void _addQueue(void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* node = (U8*)AllocMem(0x08 + GetSize(type[1]));
 	Copy(node + 0x08, type[1], &item);
 	*(void**)node = NULL;
@@ -2114,13 +2132,13 @@ EXPORT void _addQueue(void* me_, const U8* type, const void* item)
 
 EXPORT void _addDict(void* me_, const U8* type, const U8* value_type, const void* key, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	Bool addition;
 	U8* child1;
 	U8* child2;
 	UNUSED(value_type);
 	GetDictTypes(type, &child1, &child2);
-	THROWDBG(IsRef(*child1) && key == NULL, 0xc0000005); // 'key' must not be 'null'.
+	THROWDBG(IsRef(*child1) && key == NULL, EXCPT_ACCESS_VIOLATION); // 'key' must not be 'null'.
 	*(void**)((U8*)me_ + 0x10) = AddDictRecursion(*(void**)((U8*)me_ + 0x10), key, item, GetCmpFunc(child1), child1, child2, &addition);
 	if (addition)
 		(*(S64*)((U8*)me_ + 0x08))++;
@@ -2129,8 +2147,8 @@ EXPORT void _addDict(void* me_, const U8* type, const U8* value_type, const void
 
 EXPORT void* _getList(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, EXCPT_ACCESS_VIOLATION);
 	void* result = NULL;
 	Copy(&result, type[1], (U8*)*(void**)((U8*)me_ + 0x20) + 0x10);
 	return result;
@@ -2138,9 +2156,9 @@ EXPORT void* _getList(void* me_, const U8* type)
 
 EXPORT void* _getStack(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* node = *(void**)((U8*)me_ + 0x10);
-	THROWDBG(node == NULL, 0xc0000005);
+	THROWDBG(node == NULL, EXCPT_ACCESS_VIOLATION);
 	void* result = NULL;
 	Copy(&result, type[1], (U8*)node + 0x08);
 	*(void**)((U8*)me_ + 0x10) = *(void**)node;
@@ -2161,9 +2179,9 @@ EXPORT void* _getStack(void* me_, const U8* type)
 
 EXPORT void* _getQueue(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* node = *(void**)((U8*)me_ + 0x10);
-	THROWDBG(node == NULL, 0xc0000005);
+	THROWDBG(node == NULL, EXCPT_ACCESS_VIOLATION);
 	void* result = NULL;
 	Copy(&result, type[1], (U8*)node + 0x08);
 	*(void**)((U8*)me_ + 0x10) = *(void**)node;
@@ -2184,13 +2202,13 @@ EXPORT void* _getQueue(void* me_, const U8* type)
 	return result;
 }
 
-EXPORT void* _getDict(void* me_, const U8* type, const void* key)
+EXPORT void* _getDict(void* me_, const U8* type, const void* key, Bool* existed)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* child1;
 	U8* child2;
 	GetDictTypes(type, &child1, &child2);
-	THROWDBG(IsRef(*child1) && key == NULL, 0xc0000005); // 'key' must not be 'null'.
+	THROWDBG(IsRef(*child1) && key == NULL, EXCPT_ACCESS_VIOLATION); // 'key' must not be 'null'.
 	{
 		int(*cmp_func)(const void* a, const void* b) = GetCmpFunc(child1);
 		const void* node = *(void**)((U8*)me_ + 0x10);
@@ -2201,6 +2219,7 @@ EXPORT void* _getDict(void* me_, const U8* type, const void* key)
 			{
 				void* result = NULL;
 				Copy(&result, *child2, (U8*)node + 0x20);
+				*existed = True;
 				return result;
 			}
 			if (cmp < 0)
@@ -2209,12 +2228,13 @@ EXPORT void* _getDict(void* me_, const U8* type, const void* key)
 				node = *(void**)((U8*)node + 0x08);
 		}
 	}
+	*existed = False;
 	return NULL;
 }
 
 EXPORT void* _getOffset(void* me_, const U8* type, S64 offset)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* ptr = *(void**)((U8*)me_ + 0x20);
 	S64 i;
 	if (offset >= 0)
@@ -2227,7 +2247,7 @@ EXPORT void* _getOffset(void* me_, const U8* type, S64 offset)
 		for (i = 0; i > offset; i--)
 			ptr = *(void**)ptr;
 	}
-	THROWDBG(ptr == NULL, 0xc0000005);
+	THROWDBG(ptr == NULL, EXCPT_ACCESS_VIOLATION);
 	{
 		void* result = NULL;
 		Copy(&result, type[1], (U8*)ptr + 0x10);
@@ -2237,39 +2257,39 @@ EXPORT void* _getOffset(void* me_, const U8* type, S64 offset)
 
 EXPORT void _head(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	UNUSED(type);
 	*(void**)((U8*)me_ + 0x20) = *(void**)((U8*)me_ + 0x10);
 }
 
 EXPORT void _tail(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	UNUSED(type);
 	*(void**)((U8*)me_ + 0x20) = *(void**)((U8*)me_ + 0x18);
 }
 
 EXPORT void _next(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* ptr = *(void**)((U8*)me_ + 0x20);
-	THROWDBG(ptr == NULL, 0xc0000005);
+	THROWDBG(ptr == NULL, EXCPT_ACCESS_VIOLATION);
 	UNUSED(type);
 	*(void**)((U8*)me_ + 0x20) = *(void**)((U8*)ptr + 0x08);
 }
 
 EXPORT void _prev(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* ptr = *(void**)((U8*)me_ + 0x20);
-	THROWDBG(ptr == NULL, 0xc0000005);
+	THROWDBG(ptr == NULL, EXCPT_ACCESS_VIOLATION);
 	UNUSED(type);
 	*(void**)((U8*)me_ + 0x20) = *(void**)ptr;
 }
 
 EXPORT void _moveOffset(void* me_, const U8* type, S64 offset)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* ptr = *(void**)((U8*)me_ + 0x20);
 	S64 i;
 	UNUSED(type);
@@ -2296,14 +2316,14 @@ EXPORT void _moveOffset(void* me_, const U8* type, S64 offset)
 
 EXPORT Bool _term(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	UNUSED(type);
 	return *(void**)((U8*)me_ + 0x20) == NULL;
 }
 
 EXPORT Bool _termOffset(void* me_, const U8* type, S64 offset)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* ptr = *(void**)((U8*)me_ + 0x20);
 	S64 i;
 	UNUSED(type);
@@ -2332,8 +2352,8 @@ EXPORT Bool _termOffset(void* me_, const U8* type, S64 offset)
 
 EXPORT void _del(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, EXCPT_ACCESS_VIOLATION);
 	{
 		void* ptr = *(void**)((U8*)me_ + 0x20);
 		void* next = *(void**)((U8*)ptr + 0x08);
@@ -2364,12 +2384,12 @@ EXPORT void _del(void* me_, const U8* type)
 
 EXPORT void _delNext(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, EXCPT_ACCESS_VIOLATION);
 	{
 		void* ptr = *(void**)((U8*)me_ + 0x20);
 		void* next = *(void**)((U8*)ptr + 0x08);
-		THROWDBG(next == NULL, 0xc0000005);
+		THROWDBG(next == NULL, EXCPT_ACCESS_VIOLATION);
 		void* next_next = *(void**)((U8*)next + 0x08);
 		*(void**)((U8*)ptr + 0x08) = next_next;
 		if (next_next == NULL)
@@ -2393,8 +2413,8 @@ EXPORT void _delNext(void* me_, const U8* type)
 
 EXPORT void _ins(void* me_, const U8* type, const void* item)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(*(void**)((U8*)me_ + 0x20) == NULL, EXCPT_ACCESS_VIOLATION);
 	{
 		void* ptr = *(void**)((U8*)me_ + 0x20);
 		U8* node = (U8*)AllocMem(0x10 + GetSize(type[1]));
@@ -2412,7 +2432,7 @@ EXPORT void _ins(void* me_, const U8* type, const void* item)
 
 EXPORT void* _toArray(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	size_t size = GetSize(type[1]);
 	S64 len = *(S64*)((U8*)me_ + 0x08);
 	Bool is_str = type[1] == TypeId_Char;
@@ -2437,7 +2457,7 @@ EXPORT void* _toArray(void* me_, const U8* type)
 
 EXPORT void* _toArrayKey(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* child1;
 	U8* child2;
 	GetDictTypes(type, &child1, &child2);
@@ -2469,7 +2489,7 @@ EXPORT void* _toArrayKey(void* me_, const U8* type)
 
 EXPORT void* _toArrayValue(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* child1;
 	U8* child2;
 	GetDictTypes(type, &child1, &child2);
@@ -2501,9 +2521,9 @@ EXPORT void* _toArrayValue(void* me_, const U8* type)
 
 EXPORT void* _peek(void* me_, const U8* type)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	void* node = *(void**)((U8*)me_ + 0x10);
-	THROWDBG(node == NULL, 0xc0000005);
+	THROWDBG(node == NULL, EXCPT_ACCESS_VIOLATION);
 	void* result = NULL;
 	Copy(&result, type[1], (U8*)node + 0x08);
 	return result;
@@ -2511,11 +2531,11 @@ EXPORT void* _peek(void* me_, const U8* type)
 
 EXPORT Bool _exist(void* me_, const U8* type, const void* key)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* child1;
 	U8* child2;
 	GetDictTypes(type, &child1, &child2);
-	THROWDBG(IsRef(*child1) && key == NULL, 0xc0000005); // 'key' must not be 'null'.
+	THROWDBG(IsRef(*child1) && key == NULL, EXCPT_ACCESS_VIOLATION); // 'key' must not be 'null'.
 	{
 		int(*cmp_func)(const void* a, const void* b) = GetCmpFunc(child1);
 		const void* node = *(void**)((U8*)me_ + 0x10);
@@ -2535,8 +2555,8 @@ EXPORT Bool _exist(void* me_, const U8* type, const void* key)
 
 EXPORT Bool _forEach(void* me_, const U8* type, const void* callback, void* data)
 {
-	THROWDBG(me_ == NULL, 0xc0000005);
-	THROWDBG(callback == NULL, 0xc0000005);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(callback == NULL, EXCPT_ACCESS_VIOLATION);
 	U8* child1;
 	U8* child2;
 	GetDictTypes(type, &child1, &child2);
@@ -2546,6 +2566,54 @@ EXPORT Bool _forEach(void* me_, const U8* type, const void* callback, void* data
 			return True;
 		return ForEachRecursion(ptr, child1, child2, callback, data);
 	}
+}
+
+EXPORT void _delDict(void* me_, const U8* type, const void* key)
+{
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	U8* child1;
+	U8* child2;
+	GetDictTypes(type, &child1, &child2);
+	THROWDBG(IsRef(*child1) && key == NULL, EXCPT_ACCESS_VIOLATION); // 'key' must not be 'null'.
+	{
+		Bool deleted = False;
+		Bool balanced = False;
+		*(void**)((U8*)me_ + 0x10) = DelDictRecursion(*(void**)((U8*)me_ + 0x10), key, GetCmpFunc(child1), child1, child2, &deleted, &balanced);
+		if (deleted)
+			(*(S64*)((U8*)me_ + 0x08))--;
+	}
+}
+
+EXPORT S64 _idx(void* me_, const U8* type)
+{
+	UNUSED(type);
+	THROWDBG(me_ == NULL, EXCPT_ACCESS_VIOLATION);
+	void* cur = *(void**)((U8*)me_ + 0x20);
+	void* ptr = *(void**)((U8*)me_ + 0x10);
+	S64 idx = 0;
+	if (cur == NULL)
+		return -1;
+	while (ptr != NULL)
+	{
+		if (ptr == cur)
+			return idx;
+		idx++;
+		ptr = *(void**)((U8*)ptr + 0x08);
+	}
+	return -1;
+}
+
+EXPORT SClass* _getPtr(void* me_, const U8* type, SClass* me2)
+{
+	SListPtr* ptr = (SListPtr*)me2;
+	ptr->Ptr = *(void**)((U8*)me_ + 0x20);
+	return me2;
+}
+
+EXPORT void _setPtr(void* me_, const U8* type, SClass* ptr)
+{
+	SListPtr* ptr2 = (SListPtr*)ptr;
+	*(void**)((U8*)me_ + 0x20) = ptr2->Ptr;
 }
 
 static Bool IsRef(U8 type)
@@ -2582,7 +2650,7 @@ static S64 Add(S64 a, S64 b)
 {
 #if defined(DBG)
 	if (AddAsm(&a, b))
-		THROW(0xe9170003);
+		THROW(EXCPT_DBG_INT_OVERFLOW);
 	return a;
 #else
 	return a + b;
@@ -2593,7 +2661,7 @@ static S64 Sub(S64 a, S64 b)
 {
 #if defined(DBG)
 	if (SubAsm(&a, b))
-		THROW(0xe9170003);
+		THROW(EXCPT_DBG_INT_OVERFLOW);
 	return a;
 #else
 	return a - b;
@@ -2604,7 +2672,7 @@ static S64 Mul(S64 a, S64 b)
 {
 #if defined(DBG)
 	if (MulAsm(&a, b))
-		THROW(0xe9170003);
+		THROW(EXCPT_DBG_INT_OVERFLOW);
 	return a;
 #else
 	return a * b;
@@ -2748,28 +2816,206 @@ static void* AddDictRecursion(void* node, const void* key, const void* item, int
 			*(void**)((U8*)node + 0x08) = AddDictRecursion(*(void**)((U8*)node + 0x08), key, item, cmp_func, key_type, item_type, addition);
 	}
 	if (*(void**)((U8*)node + 0x08) != NULL && *(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10))
-	{
-		void* r = *(void**)((U8*)node + 0x08);
-		*(void**)((U8*)node + 0x08) = *(void**)r;
-		*(void**)r = node;
-		*(Bool*)((U8*)r + 0x10) = *(Bool*)((U8*)node + 0x10);
-		*(Bool*)((U8*)node + 0x10) = True;
-		node = r;
-	}
+		node = DictRotateLeft(node);
 	if (*(void**)node != NULL && *(Bool*)((U8*)*(void**)node + 0x10) && *(void**)*(void**)node != NULL && *(Bool*)((U8*)*(void**)*(void**)node + 0x10))
 	{
-		void* l = *(void**)node;
-		*(void**)node = *(void**)((U8*)l + 0x08);
-		*(void**)((U8*)l + 0x08) = node;
-		*(Bool*)((U8*)l + 0x10) = *(Bool*)((U8*)node + 0x10);
-		*(Bool*)((U8*)node + 0x10) = True;
-		node = l;
+		node = DictRotateRight(node);
 		*(Bool*)((U8*)node + 0x10) = True;
 		*(Bool*)((U8*)*(void**)node + 0x10) = False;
 		*(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10) = False;
 	}
 	// '*addition' should have been set so far.
 	return node;
+}
+
+static void* DelDictRecursion(void* node, const void* key, int cmp_func(const void* a, const void* b), U8* key_type, U8* item_type, Bool* deleted, Bool* balanced)
+{
+	if (node == NULL)
+	{
+		*balanced = True;
+		return NULL;
+	}
+	int cmp = cmp_func(key, *(void**)((U8*)node + 0x18));
+	if (cmp == 0)
+	{
+		if (*(void**)node == NULL && *(void**)((U8*)node + 0x08) == NULL)
+		{
+			*balanced = *(Bool*)((U8*)node + 0x10);
+
+			if (IsRef(*key_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x18);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, key_type);
+				}
+			}
+			if (IsRef(*item_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x20);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, item_type);
+				}
+			}
+			FreeMem(node);
+			*deleted = True;
+
+			return NULL;
+		}
+		if (*(void**)((U8*)node + 0x08) == NULL)
+		{
+			*(Bool*)((U8*)*(void**)node + 0x10) = False;
+			*balanced = True;
+			void* result = *(void**)node;
+
+			if (IsRef(*key_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x18);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, key_type);
+				}
+			}
+			if (IsRef(*item_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x20);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, item_type);
+				}
+			}
+			FreeMem(node);
+			*deleted = True;
+
+			return result;
+		}
+		{
+			void* ptr = *(void**)((U8*)node + 0x08);
+			while (*(void**)ptr != NULL)
+				ptr = *(void**)ptr;
+			*(void**)((U8*)node + 0x18) = NULL;
+			ASSERT(node != ptr);
+			if (IsRef(*key_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x18);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, key_type);
+				}
+			}
+			if (IsRef(*item_type))
+			{
+				void* ptr2 = *(void**)((U8*)node + 0x20);
+				if (ptr2 != NULL)
+				{
+					(*(S64*)ptr2)--;
+					if (*(S64*)ptr2 == 0)
+						_freeSet(ptr2, item_type);
+				}
+			}
+			Copy((U8*)node + 0x18, *key_type, (U8*)ptr + 0x18);
+			Copy((U8*)node + 0x20, *item_type, (U8*)ptr + 0x20);
+		}
+		*(void**)((U8*)node + 0x08) = DelDictRecursion(*(void**)((U8*)node + 0x08), *(void**)((U8*)node + 0x18), cmp_func, key_type, item_type, deleted, balanced);
+		return DelDictBalanceRightRecursion(node, balanced);
+	}
+	if (cmp < 0)
+	{
+		*(void**)node = DelDictRecursion(*(void**)node, key, cmp_func, key_type, item_type, deleted, balanced);
+		return DelDictBalanceLeftRecursion(node, balanced);
+	}
+	*(void**)((U8*)node + 0x08) = DelDictRecursion(*(void**)((U8*)node + 0x08), key, cmp_func, key_type, item_type, deleted, balanced);
+	return DelDictBalanceRightRecursion(node, balanced);
+}
+
+static void* DelDictBalanceLeftRecursion(void* node, Bool* balanced)
+{
+	if (balanced)
+		return node;
+	if (*(void**)((U8*)node + 0x08) != NULL && *(void**)*(void**)((U8*)node + 0x08) != NULL && !*(Bool*)((U8*)*(void**)*(void**)((U8*)node + 0x08) + 0x10))
+	{
+		node = DictRotateLeft(node);
+		if (!*(Bool*)((U8*)node + 0x10))
+			return node;
+		*(Bool*)((U8*)node + 0x10) = False;
+	}
+	else
+	{
+		*(void**)((U8*)node + 0x08) = DictRotateRight(*(void**)((U8*)node + 0x08));
+		node = DictRotateLeft(node);
+		*(Bool*)((U8*)*(void**)node + 0x10) = False;
+		*(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10) = False;
+	}
+	*balanced = True;
+	return node;
+}
+
+static void* DelDictBalanceRightRecursion(void* node, Bool* balanced)
+{
+	if (balanced)
+		return node;
+	if (*(void**)node != NULL && *(void**)*(void**)node != NULL && !*(Bool*)((U8*)*(void**)*(void**)node + 0x10))
+	{
+		if (!*(Bool*)((U8*)*(void**)node + 0x10))
+		{
+			*(Bool*)((U8*)*(void**)node + 0x10) = True;
+			if (!*(Bool*)((U8*)node + 0x10))
+				return node;
+			*(Bool*)((U8*)node + 0x10) = False;
+		}
+		else if (*(void**)node != NULL && *(void**)((U8*)*(void**)node + 0x08) != NULL && *(void**)*(void**)((U8*)*(void**)node + 0x08) != NULL && !*(Bool*)((U8*)*(void**)*(void**)((U8*)*(void**)node + 0x08) + 0x10))
+		{
+			node = DictRotateRight(node);
+			*(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10) = False;
+			*(Bool*)((U8*)*(void**)*(void**)((U8*)node + 0x08) + 0x10) = True;
+		}
+		else
+		{
+			*(void**)node = DictRotateLeft(*(void**)node);
+			node = DictRotateRight(node);
+			*(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10) = False;
+			*(Bool*)((U8*)*(void**)((U8*)*(void**)node + 0x08) + 0x10) = False;
+		}
+	}
+	else
+	{
+		node = DictRotateRight(node);
+		*(Bool*)((U8*)*(void**)node + 0x10) = False;
+		*(Bool*)((U8*)*(void**)((U8*)node + 0x08) + 0x10) = False;
+	}
+	*balanced = True;
+	return node;
+}
+
+static void* DictRotateLeft(void* node)
+{
+	void* r = *(void**)((U8*)node + 0x08);
+	*(void**)((U8*)node + 0x08) = *(void**)r;
+	*(void**)r = node;
+	*(Bool*)((U8*)r + 0x10) = *(Bool*)((U8*)node + 0x10);
+	*(Bool*)((U8*)node + 0x10) = True;
+	return r;
+}
+
+static void* DictRotateRight(void* node)
+{
+	void* l = *(void**)node;
+	*(void**)node = *(void**)((U8*)l + 0x08);
+	*(void**)((U8*)l + 0x08) = node;
+	*(Bool*)((U8*)l + 0x10) = *(Bool*)((U8*)node + 0x10);
+	*(Bool*)((U8*)node + 0x10) = True;
+	return l;
 }
 
 static void* CopyDictRecursion(void* node, U8* key_type, U8* item_type)
@@ -3018,7 +3264,7 @@ static void MergeSortArray(void* me_, const U8* type, Bool asc)
 	S64 i, j;
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	while (n < len)
 	{
 		for (i = 0; i < len; i += n * 2)
@@ -3087,7 +3333,7 @@ static void MergeSortList(void* me_, const U8* type, Bool asc)
 	S64 i, j;
 	int(*cmp)(const void* a, const void* b) = GetCmpFunc(type + 1);
 	if (cmp == NULL)
-		THROW(0xe9170004);
+		THROW(EXCPT_INVALID_CMP);
 	{
 		void* ptr = *(void**)((U8*)me_ + 0x10);
 		for (i = 0; i < len; i++)

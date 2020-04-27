@@ -10,6 +10,10 @@ Texture2D ImgSpecular: register(t1);
 Texture2D ImgNormal: register(t2);
 Texture2D ImgToon: register(t3);
 SamplerState Sampler: register(s0);
+#ifdef SM
+Texture2D ImgSm: register(t4);
+SamplerComparisonState SamplerSm: register(s1);
+#endif
 
 struct PS_INPUT
 {
@@ -19,6 +23,9 @@ struct PS_INPUT
 	float3 Dir: K_DIR;
 	float3 Up: K_UP;
 	float2 Tex: TEXCOORD;
+#ifdef SM
+	float4 TexSm: K_SM_COORD;
+#endif
 };
 
 float4 main(PS_INPUT input): SV_TARGET
@@ -37,14 +44,23 @@ float4 main(PS_INPUT input): SV_TARGET
 	float toon_x = dot(normal, input.Dir) * 0.5f + 0.5f;
 	float specular_x = clamp((0.0397436f * specular.w + 0.0856832f) * (specular.x + (1.0f - specular.x) * pow(max(1.0f - dot(input.Eye, half), 0.0f), 5.0f)) * pow(max(dot(normal, half), 0.0f), specular.w) / max(max(dot(normal, input.Dir), dot(normal, input.Eye)), 0.00001f), 0.0f, 1.0f);
 	float toon_value = ImgToon.Sample(Sampler, float2(toon_x, 0.0f)).r;
-	output.xyz = DirColor.xyz *
+
+#ifdef SM
+	float3 coord = input.TexSm.xyz / input.TexSm.w;
+	float bias = min(0.01f + 0.01f * max(abs(ddx(coord.z)), abs(ddy(coord.z))), 0.1f);
+	float3 dirColor2 = DirColor.xyz * ImgSm.SampleCmpLevelZero(SamplerSm, coord.xy, saturate(coord.z - bias));
+#else
+	float3 dirColor2 = DirColor.xyz;
+#endif
+
+	output.xyz =
+		diffuse.xyz *
 		(
-			diffuse.xyz *
-			(toon_value + diffuse.xyz * 0.5f * (1.0f - toon_value)) +
-			(AmbTopColor.xyz * up + AmbBottomColor.xyz * (1.0f - up)) +
-			ImgToon.Sample(Sampler, float2(specular_x, 1.0f)).rgb
-		);
-	output.a = 1.0f;
+			AmbTopColor.xyz * up + AmbBottomColor.xyz * (1.0f - up) +
+			dirColor2 * toon_value
+		) +
+		dirColor2 * ImgToon.Sample(Sampler, float2(specular_x, 1.0f)).rgb;
+	output.a = diffuse.w;
 
 	if (output.a <= 0.02f)
 		discard;

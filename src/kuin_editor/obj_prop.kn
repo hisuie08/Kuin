@@ -1,0 +1,184 @@
+var wndObjProp: wnd@Wnd
+var result: bool
+
+class PropInfo()
+	+var name: []char
+	+var type: \doc_ar@PropType
+	+var typeDatas: [][]char
+	+var value: []char
+	+var label: wnd@Label
+	+var ctrls: []wnd@WndBase
+	+var same: bool
+	+var btnReset: wnd@Btn
+end class
+
+var propInfos: []@PropInfo
+var targets: []\doc_ar@Obj
+
+func getPropInfos(objs: []\doc_ar@Obj): []@PropInfo
+	var propsNames: [][]char :: objs[0].propsNames()
+	var propsTypes: []\doc_ar@PropType :: objs[0].propsTypes()
+	var propsTypeDatas: [][][]char :: objs[0].propsTypeDatas()
+	assert ^propsNames = ^propsTypes & ^propsTypes = ^propsTypeDatas
+	var propInfos: dict<[]char, @PropInfo> :: #dict<[]char, @PropInfo>
+	for i(0, ^propsNames - 1)
+		var propInfo: @PropInfo :: #@PropInfo
+		do propInfo.name :: propsNames[i]
+		do propInfo.type :: propsTypes[i]
+		do propInfo.typeDatas :: propsTypeDatas[i]
+		do propInfo.value :: null
+		var same: bool :: true
+		for j(0, ^objs - 1)
+			var success: bool
+			var value: []char :: objs[j].props.get(propInfo.name, &success)
+			if(!success)
+				skip i
+			end if
+			if(propInfo.value <>& null & propInfo.value <> value)
+				do same :: false
+				break j
+			end if
+			do propInfo.value :: value
+		end for
+		do propInfo.same :: same
+		if(!same)
+			do propInfo.value :: ""
+		end if
+		do propInfos.add(propsNames[i], propInfo)
+	end for
+	ret propInfos.toArrayValue()
+end func
+
++func show(objs: []\doc_ar@Obj): bool
+	do @targets :: objs
+	do @wndObjProp :: wnd@makeWnd(\form@wndMain, (%fix $ wnd@WndStyle).or(%noMinimize), 300, 480, ^objs = 1 ?(objs[0].name, \common@langEn ?("Multiple Objects", "複数のオブジェクト")))
+
+	do @propInfos :: @getPropInfos(objs)
+	for i(0, ^@propInfos - 1)
+		do @propInfos[i].label :: wnd@makeLabel(@wndObjProp, 12, 15 + 25 * i, 60, 12, %fix, %fix, @propInfos[i].name)
+		switch(@propInfos[i].type)
+		case %str, %int_, %float_
+			var edit: wnd@Edit :: wnd@makeEdit(@wndObjProp, 92, 12 + 25 * i, 180, 19, %fix, %fix)
+			do edit.setText(@propInfos[i].value)
+			do @propInfos[i].ctrls :: [edit]
+		case %bool_
+			var chk: wnd@Chk :: wnd@makeChk(@wndObjProp, 92, 12 + 25 * i, 180, 16, %fix, %fix, @propInfos[i].name)
+			do chk.setChk(@propInfos[i].value = "true")
+			do @propInfos[i].ctrls :: [chk]
+		case %enum_
+			var combo: wnd@Combo :: wnd@makeCombo(@wndObjProp, 92, 12 + 25 * i, 180, 20, %fix, %fix)
+			var value: []char :: @propInfos[i].value
+			var empty: bool :: value = ""
+			for j(0, ^@propInfos[i].typeDatas - 1)
+				do combo.add(@propInfos[i].typeDatas[j])
+				if(empty & j = 0 | @propInfos[i].typeDatas[j] = value)
+					do combo.setSel(j)
+				end if
+			end for
+			do @propInfos[i].ctrls :: [combo]
+		case %color
+			var edit: wnd@Edit :: wnd@makeEdit(@wndObjProp, 92, 12 + 25 * i, 105, 19, %fix, %fix)
+			do edit.setText(@propInfos[i].value)
+			var btn: wnd@Btn :: wnd@makeBtn(@wndObjProp, 197, 12 + 25 * i, 75, 23, %fix, %fix, \common@langEn ?("Browse...", "参照..."))
+			do btn.onPush :: btnColorOnPush
+			do @propInfos[i].ctrls :: [edit $ wnd@WndBase, btn $ wnd@WndBase]
+		case %file
+			var edit: wnd@Edit :: wnd@makeEdit(@wndObjProp, 92, 12 + 25 * i, 105, 19, %fix, %fix)
+			do edit.setText(@propInfos[i].value)
+			var btn: wnd@Btn :: wnd@makeBtn(@wndObjProp, 197, 12 + 25 * i, 75, 23, %fix, %fix, \common@langEn ?("Browse...", "参照..."))
+			do @propInfos[i].ctrls :: [edit $ wnd@WndBase, btn $ wnd@WndBase]
+		end switch
+
+		if(!@propInfos[i].same)
+			var btnReset: wnd@Btn :: wnd@makeBtn(@wndObjProp, 92, 12 + 25 * i, 100, 23, %fix, %fix, \common@langEn ?("Edit Values", "複数の編集"))
+			do btnReset.onPush :: btnResetOnPush
+			do @propInfos[i].btnReset :: btnReset
+			for j(0, ^@propInfos[i].ctrls - 1)
+				do @propInfos[i].ctrls[j].setVisible(false)
+			end for
+		end if
+	end for
+
+	var btnOk: wnd@Btn :: wnd@makeBtn(@wndObjProp, 72, 445, 75, 23, %fix, %fix, "OK")
+	do btnOk.onPush :: btnOkOnPush
+	var btnCancel: wnd@Btn :: wnd@makeBtn(@wndObjProp, 153, 445, 75, 23, %fix, %fix, \common@langEn ?("Cancel", "キャンセル"))
+	do btnCancel.onPush :: btnCancelOnPush
+
+	do @result :: false
+	do @wndObjProp.modal()
+
+	do @wndObjProp :: null
+	do @propInfos :: null
+	do @targets :: null
+
+	ret @result
+
+	func btnOkOnPush(wnd: wnd@WndBase)
+		for i(0, ^@propInfos - 1)
+			if(!@propInfos[i].same)
+				skip i
+			end if
+			var value: []char
+			switch(@propInfos[i].type)
+			case %str
+				do value :: (@propInfos[i].ctrls[0] $ wnd@Edit).getText()
+			case %int_
+				var value2: int :: (@propInfos[i].ctrls[0] $ wnd@Edit).getText().toInt(&)
+				do value :: value2.toStr()
+			case %float_
+				var value2: float :: (@propInfos[i].ctrls[0] $ wnd@Edit).getText().toFloat(&)
+				do value :: value2.toStr()
+				if(value.find('.', -1) = -1)
+					do value :~ ".0"
+				end if
+			case %bool_
+				do value :: (@propInfos[i].ctrls[0] $ wnd@Chk).getChk() ?("true", "false")
+			case %enum_
+				var combo: wnd@Combo :: @propInfos[i].ctrls[0] $ wnd@Combo
+				var sel: int :: (combo).getSel()
+				do value :: sel = -1 ?("", combo.getText(sel))
+			case %color
+				var value2: int :: (@propInfos[i].ctrls[0] $ wnd@Edit).getText().toInt(&)
+				do value :: "0x" ~ value2.toStrFmt("08X")
+			case %file
+				do value :: (@propInfos[i].ctrls[0] $ wnd@Edit).getText()
+			end switch
+			for j(0, ^@targets - 1)
+				do @targets[j].props.add(@propInfos[i].name, value)
+			end for
+		end for
+		do @result :: true
+		do @wndObjProp.close()
+	end func
+
+	func btnCancelOnPush(wnd: wnd@WndBase)
+		do @wndObjProp.close()
+	end func
+
+	func btnColorOnPush(wnd: wnd@WndBase)
+		for i(0, ^@propInfos - 1)
+			if(^@propInfos[i].ctrls >= 2 & @propInfos[i].ctrls[1] =& wnd)
+				var edit: wnd@Edit :: @propInfos[i].ctrls[0] $ wnd@Edit
+				var color: int :: edit.getText().toInt(&)
+				; var value: []char :: \color_sel@show(@wndObjProp, color)
+				do color :: wnd@colorDialog(@wndObjProp, color.clamp(0, 0xFFFFFFFF) % 0x1000000)
+				if(color <> -1)
+					do edit.setText("0xFF" ~ color.toStrFmt("06X"))
+				end if
+				ret
+			end if
+		end for
+	end func
+
+	func btnResetOnPush(wnd: wnd@WndBase)
+		for i(0, ^@propInfos - 1)
+			if(@propInfos[i].btnReset =& wnd)
+				do @propInfos[i].btnReset.setVisible(false)
+				for j(0, ^@propInfos[i].ctrls - 1)
+					do @propInfos[i].ctrls[j].setVisible(true)
+				end for
+				do @propInfos[i].same :: true
+			end if
+		end for
+	end func
+end func

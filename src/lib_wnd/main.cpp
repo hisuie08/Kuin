@@ -10,6 +10,7 @@
 #include "draw.h"
 #include "snd.h"
 #include "input.h"
+#include "png_decoder.h"
 
 #pragma comment(lib, "Comctl32.lib")
 
@@ -19,6 +20,7 @@ enum EWndKind
 	WndKind_WndFix,
 	WndKind_WndAspect,
 	WndKind_WndPopup,
+	WndKind_WndDialog,
 	WndKind_WndMdi,
 	WndKind_WndMdiChild,
 	WndKind_WndDock,
@@ -31,7 +33,6 @@ enum EWndKind
 	WndKind_EditMulti,
 	WndKind_List,
 	WndKind_Combo,
-	WndKind_ComboList,
 	WndKind_Label,
 	WndKind_Group,
 	WndKind_Calendar,
@@ -45,7 +46,6 @@ enum EWndKind
 	WndKind_Pager,
 	WndKind_Tab,
 	WndKind_Tree,
-	WndKind_TreeMulti,
 	WndKind_SplitX,
 	WndKind_SplitY,
 	WndKind_ScrollX,
@@ -74,6 +74,7 @@ struct SWndBase
 	U16 DefaultY;
 	U16 DefaultWidth;
 	U16 DefaultHeight;
+	Bool RedrawEnabled;
 	void* Children;
 };
 
@@ -87,6 +88,8 @@ struct SWnd
 	void* OnClose;
 	void* OnActivate;
 	void* OnPushMenu;
+	void* OnDropFiles;
+	void* OnResize;
 	Bool ModalLock;
 };
 
@@ -96,6 +99,7 @@ struct SDraw
 	Bool EqualMagnification;
 	Bool DrawTwice;
 	Bool Enter;
+	Bool Editable;
 	S16 WheelX;
 	S16 WheelY;
 	void* DrawBuf;
@@ -143,6 +147,7 @@ struct SEditBase
 {
 	SWndBase WndBase;
 	void* OnChange;
+	void* OnFocus;
 };
 
 struct SEdit
@@ -223,6 +228,10 @@ struct SListView
 	void* OnSel;
 	void* OnMouseDoubleClick;
 	void* OnMouseClick;
+	void* OnMoveNode;
+	Bool Draggable;
+	Bool Dragging;
+	HIMAGELIST DraggingImage;
 };
 
 struct SPager
@@ -236,7 +245,7 @@ struct STab
 	void* OnSel;
 };
 
-struct STreeBase
+struct STree
 {
 	SWndBase WndBase;
 	Bool Draggable;
@@ -244,16 +253,6 @@ struct STreeBase
 	HTREEITEM DraggingItem;
 	void* OnSel;
 	void* OnMoveNode;
-};
-
-struct STree
-{
-	STreeBase TreeBase;
-};
-
-struct STreeMulti
-{
-	STreeBase TreeBase;
 };
 
 struct STreeNode
@@ -295,6 +294,8 @@ static void* OnKeyPress;
 static int WndCnt;
 static Bool ExitAct;
 static HFONT FontCtrl;
+static Char FileDialogDir[KUIN_MAX_PATH + 1];
+static HINSTANCE Instance;
 
 static const U8* NToRN(const Char* str);
 static const U8* RNToN(const Char* str);
@@ -307,6 +308,9 @@ static Char* ParseFilter(const U8* filter, int* num);
 static void TreeExpandAllRecursion(HWND wnd_handle, HTREEITEM node, int flag);
 static void CopyTreeNodeRecursion(HWND tree_wnd, HTREEITEM dst, HTREEITEM src, Char* buf);
 static void ListViewAdjustWidth(HWND wnd);
+static SClass* MakeDrawImpl(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchor_x, S64 anchor_y, Bool equal_magnification, Bool editable, int split);
+static HIMAGELIST CreateImageList(const void* imgs);
+static LRESULT CALLBACK CommonWndProc(HWND wnd, SWndBase* wnd2, SWnd* wnd3, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcWndNormal(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcWndFix(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcWndAspect(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
@@ -318,7 +322,6 @@ static LRESULT CALLBACK WndProcEdit(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 static LRESULT CALLBACK WndProcEditMulti(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcList(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcCombo(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
-static LRESULT CALLBACK WndProcComboList(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcLabel(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcGroup(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
 static LRESULT CALLBACK WndProcCalendar(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param);
@@ -354,15 +357,13 @@ SClass* IncWndRef(SClass* wnd)
 
 EXPORT_CPP void _init(void* heap, S64* heap_cnt, S64 app_code, const U8* use_res_flags)
 {
-	Heap = heap;
-	HeapCnt = heap_cnt;
-	AppCode = app_code;
-	UseResFlags = use_res_flags;
-	Instance = static_cast<HINSTANCE>(GetModuleHandle(NULL));
+	if (!InitEnvVars(heap, heap_cnt, app_code, use_res_flags))
+		return;
 
 	WndCnt = 0;
 	ExitAct = False;
 
+	Instance = (HINSTANCE)GetModuleHandle(NULL);
 	HICON icon = LoadIcon(Instance, reinterpret_cast<LPCWSTR>(static_cast<S64>(0x65))); // 0x65 is the resource ID of the application icon.
 	{
 		WNDCLASSEX wnd_class;
@@ -400,6 +401,22 @@ EXPORT_CPP void _init(void* heap, S64* heap_cnt, S64 app_code, const U8* use_res
 		WNDCLASSEX wnd_class;
 		wnd_class.cbSize = sizeof(WNDCLASSEX);
 		wnd_class.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;
+		wnd_class.lpfnWndProc = WndProcWndFix;
+		wnd_class.cbClsExtra = 0;
+		wnd_class.cbWndExtra = 0;
+		wnd_class.hInstance = Instance;
+		wnd_class.hIcon = NULL;
+		wnd_class.hCursor = LoadCursor(NULL, IDC_ARROW);
+		wnd_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+		wnd_class.lpszMenuName = NULL;
+		wnd_class.lpszClassName = L"KuinWndDialogClass";
+		wnd_class.hIconSm = NULL;
+		RegisterClassEx(&wnd_class);
+	}
+	{
+		WNDCLASSEX wnd_class;
+		wnd_class.cbSize = sizeof(WNDCLASSEX);
+		wnd_class.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;
 		wnd_class.lpfnWndProc = WndProcWndAspect;
 		wnd_class.cbClsExtra = 0;
 		wnd_class.cbWndExtra = 0;
@@ -424,6 +441,7 @@ EXPORT_CPP void _init(void* heap, S64* heap_cnt, S64 app_code, const U8* use_res
 	Input::Init();
 
 	OnKeyPress = NULL;
+	FileDialogDir[0] = L'\0';
 }
 
 EXPORT_CPP void _fin()
@@ -473,9 +491,14 @@ EXPORT_CPP Bool _act()
 	return True;
 }
 
-EXPORT_CPP void _onKeyPress(void* onKeyPressFunc)
+EXPORT_CPP void _setOnKeyPress(void* onKeyPressFunc)
 {
 	OnKeyPress = onKeyPressFunc;
+}
+
+EXPORT_CPP void* _getOnKeyPress()
+{
+	return OnKeyPress;
 }
 
 EXPORT_CPP S64 _msgBox(SClass* parent, const U8* text, const U8* title, S64 icon, S64 btn)
@@ -489,7 +512,7 @@ EXPORT_CPP void* _openFileDialog(SClass* parent, const U8* filter, S64 defaultFi
 	path[0] = L'\0';
 	int filter_num;
 	Char* filter_mem = ParseFilter(filter, &filter_num);
-	THROWDBG(!(filter_num == 0 && defaultFilter == 0 || filter_num != 0 && 0 <= defaultFilter && defaultFilter < filter_num), 0xe9170006);
+	THROWDBG(!(filter_num == 0 && defaultFilter == 0 || filter_num != 0 && 0 <= defaultFilter && defaultFilter < filter_num), EXCPT_DBG_ARG_OUT_DOMAIN);
 	OPENFILENAME open_file_name;
 	memset(&open_file_name, 0, sizeof(OPENFILENAME));
 	open_file_name.lStructSize = sizeof(OPENFILENAME);
@@ -498,7 +521,7 @@ EXPORT_CPP void* _openFileDialog(SClass* parent, const U8* filter, S64 defaultFi
 	open_file_name.nFilterIndex = filter_num == 0 ? 0 : static_cast<DWORD>(defaultFilter + 1);
 	open_file_name.lpstrFile = path;
 	open_file_name.nMaxFile = KUIN_MAX_PATH + 1;
-	open_file_name.lpstrInitialDir = NULL;
+	open_file_name.lpstrInitialDir = FileDialogDir[0] == L'\0' ? NULL : FileDialogDir;
 	open_file_name.lpstrTitle = NULL;
 	open_file_name.Flags = OFN_FILEMUSTEXIST;
 	BOOL success = GetOpenFileName(&open_file_name);
@@ -528,7 +551,7 @@ EXPORT_CPP void* _saveFileDialog(SClass* parent, const U8* filter, S64 defaultFi
 	path[0] = L'\0';
 	int filter_num;
 	Char* filter_mem = ParseFilter(filter, &filter_num);
-	THROWDBG(!(filter_num == 0 && defaultFilter == 0 || filter_num != 0 && 0 <= defaultFilter && defaultFilter < filter_num), 0xe9170006);
+	THROWDBG(!(filter_num == 0 && defaultFilter == 0 || filter_num != 0 && 0 <= defaultFilter && defaultFilter < filter_num), EXCPT_DBG_ARG_OUT_DOMAIN);
 	OPENFILENAME open_file_name;
 	memset(&open_file_name, 0, sizeof(OPENFILENAME));
 	open_file_name.lStructSize = sizeof(OPENFILENAME);
@@ -537,7 +560,7 @@ EXPORT_CPP void* _saveFileDialog(SClass* parent, const U8* filter, S64 defaultFi
 	open_file_name.nFilterIndex = filter_num == 0 ? 0 : static_cast<DWORD>(defaultFilter + 1);
 	open_file_name.lpstrFile = path;
 	open_file_name.nMaxFile = KUIN_MAX_PATH + 1;
-	open_file_name.lpstrInitialDir = NULL;
+	open_file_name.lpstrInitialDir = FileDialogDir[0] == L'\0' ? NULL : FileDialogDir;
 	open_file_name.lpstrTitle = NULL;
 	open_file_name.lpstrDefExt = defaultExt == NULL ? NULL : reinterpret_cast<const Char*>(defaultExt + 0x10);
 	open_file_name.Flags = OFN_OVERWRITEPROMPT;
@@ -554,6 +577,46 @@ EXPORT_CPP void* _saveFileDialog(SClass* parent, const U8* filter, S64 defaultFi
 	for (size_t i = 0; i <= len; i++)
 		dst[i] = path[i] == L'\\' ? L'/' : path[i];
 	return result;
+}
+
+EXPORT_CPP void _fileDialogDir(const U8* defaultDir)
+{
+	if (defaultDir == NULL)
+	{
+		FileDialogDir[0] = L'\0';
+		return;
+	}
+	const Char* path = reinterpret_cast<const Char*>(defaultDir + 0x10);
+	size_t len = wcslen(path);
+	if (len > KUIN_MAX_PATH)
+	{
+		FileDialogDir[0] = L'\0';
+		return;
+	}
+	for (size_t i = 0; i < len; i++)
+		FileDialogDir[i] = path[i] == L'/' ? L'\\' : path[i];
+	FileDialogDir[len] = L'\0';
+}
+
+EXPORT_CPP S64 _colorDialog(SClass* parent, S64 default_color)
+{
+	CHOOSECOLOR choose_color = { 0 };
+	choose_color.lStructSize = sizeof(CHOOSECOLOR);
+	choose_color.hwndOwner = parent == NULL ? NULL : reinterpret_cast<SWndBase*>(parent)->WndHandle;
+	choose_color.rgbResult = static_cast<COLORREF>(((default_color & 0xff) << 16) | (default_color & 0xff00) | ((default_color & 0xff0000) >> 16));
+	choose_color.Flags = CC_FULLOPEN | CC_RGBINIT;
+
+	DWORD colors[16];
+	for (int i = 0; i < 16; i++)
+		colors[i] = 0xffffff;
+	choose_color.lpCustColors = colors;
+
+	if (ChooseColor(&choose_color))
+	{
+		S64 result = static_cast<S64>(choose_color.rgbResult);
+		return ((result & 0xff) << 16) | (result & 0xff00) | ((result & 0xff0000) >> 16);
+	}
+	return -1;
 }
 
 EXPORT_CPP void _setClipboardStr(const U8* str)
@@ -698,7 +761,7 @@ EXPORT_CPP SClass* _makeWnd(SClass* me_, SClass* parent, S64 style, S64 width, S
 {
 	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
 	me2->Kind = static_cast<EWndKind>(static_cast<S64>(WndKind_WndNormal) + (style & 0xffff));
-	THROWDBG(width <= 0 || height <= 0, 0xe9170006);
+	THROWDBG(width <= 0 || height <= 0, EXCPT_DBG_ARG_OUT_DOMAIN);
 	int width2 = static_cast<int>(width);
 	int height2 = static_cast<int>(height);
 	HWND parent2 = parent == NULL ? NULL : reinterpret_cast<SWndBase*>(parent)->WndHandle;
@@ -717,14 +780,17 @@ EXPORT_CPP SClass* _makeWnd(SClass* me_, SClass* parent, S64 style, S64 width, S
 			me2->WndHandle = CreateWindowEx(ex_style, L"KuinWndAspectClass", text == NULL ? L"" : reinterpret_cast<const Char*>(text + 0x10), (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, width2, height2, parent2, NULL, Instance, NULL);
 			break;
 		case WndKind_WndPopup:
-			me2->WndHandle = CreateWindowEx(ex_style, L"KuinWndFixClass", text == NULL ? L"" : reinterpret_cast<const Char*>(text + 0x10), WS_POPUP | WS_BORDER | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, width2, height2, parent2, NULL, Instance, NULL);
+			me2->WndHandle = CreateWindowEx(ex_style | WS_EX_TOOLWINDOW, L"KuinWndDialogClass", text == NULL ? L"" : reinterpret_cast<const Char*>(text + 0x10), WS_POPUP | WS_BORDER | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, width2, height2, parent2, NULL, Instance, NULL);
+			break;
+		case WndKind_WndDialog:
+			me2->WndHandle = CreateWindowEx(ex_style | WS_EX_TOOLWINDOW, L"KuinWndDialogClass", text == NULL ? L"" : reinterpret_cast<const Char*>(text + 0x10), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, width2, height2, parent2, NULL, Instance, NULL);
 			break;
 		default:
-			THROWDBG(True, 0xe9170006);
+			THROWDBG(True, EXCPT_DBG_ARG_OUT_DOMAIN);
 			break;
 	}
 	if (me2->WndHandle == NULL)
-		THROW(0xe9170009);
+		THROW(EXCPT_DEVICE_INIT_FAILED);
 	if ((style & static_cast<S64>(WndKind_WndLayered)) != 0)
 		SetLayeredWindowAttributes(me2->WndHandle, NULL, 255, LWA_ALPHA);
 	if ((style & static_cast<S64>(WndKind_WndNoMinimize)) != 0)
@@ -746,6 +812,7 @@ EXPORT_CPP SClass* _makeWnd(SClass* me_, SClass* parent, S64 style, S64 width, S
 	me2->DefaultY = 0;
 	me2->DefaultWidth = static_cast<U16>(width);
 	me2->DefaultHeight = static_cast<U16>(height);
+	me2->RedrawEnabled = True;
 	me2->Children = AllocMem(0x28);
 	*(S64*)me2->Children = 1;
 	memset((U8*)me2->Children + 0x08, 0x00, 0x20);
@@ -772,6 +839,8 @@ EXPORT_CPP SClass* _makeWnd(SClass* me_, SClass* parent, S64 style, S64 width, S
 		me3->OnClose = NULL;
 		me3->OnActivate = NULL;
 		me3->OnPushMenu = NULL;
+		me3->OnDropFiles = NULL;
+		me3->OnResize = NULL;
 		me3->ModalLock = False;
 	}
 	SendMessage(me2->WndHandle, WM_SETFONT, reinterpret_cast<WPARAM>(FontCtrl), static_cast<LPARAM>(FALSE));
@@ -825,7 +894,7 @@ EXPORT_CPP void _wndBaseSetEnabled(SClass* me_, Bool is_enabled)
 
 EXPORT_CPP Bool _wndBaseGetEnabled(SClass* me_)
 {
-	return IsWindowEnabled(reinterpret_cast<SWndBase*>(me_)->WndHandle);
+	return IsWindowEnabled(reinterpret_cast<SWndBase*>(me_)->WndHandle) != FALSE;
 }
 
 EXPORT_CPP void _wndBaseSetPos(SClass* me_, S64 x, S64 y, S64 width, S64 height)
@@ -835,14 +904,19 @@ EXPORT_CPP void _wndBaseSetPos(SClass* me_, S64 x, S64 y, S64 width, S64 height)
 
 EXPORT_CPP void _wndBaseSetRedraw(SClass* me_, Bool is_enabled)
 {
-	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
-	if (is_enabled)
+	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
+	HWND wnd = me2->WndHandle;
+	if (me2->RedrawEnabled != is_enabled)
 	{
-		SendMessage(wnd, WM_SETREDRAW, TRUE, 0);
-		InvalidateRect(wnd, NULL, TRUE);
+		me2->RedrawEnabled = is_enabled;
+		if (is_enabled)
+		{
+			SendMessage(wnd, WM_SETREDRAW, TRUE, 0);
+			InvalidateRect(wnd, NULL, TRUE);
+		}
+		else
+			SendMessage(wnd, WM_SETREDRAW, FALSE, 0);
 	}
-	else
-		SendMessage(wnd, WM_SETREDRAW, FALSE, 0);
 }
 
 EXPORT_CPP void _wndBaseSetVisible(SClass* me_, Bool is_visible)
@@ -852,7 +926,7 @@ EXPORT_CPP void _wndBaseSetVisible(SClass* me_, Bool is_visible)
 
 EXPORT_CPP Bool _wndBaseGetVisible(SClass* me_)
 {
-	return IsWindowVisible(reinterpret_cast<SWndBase*>(me_)->WndHandle);
+	return IsWindowVisible(reinterpret_cast<SWndBase*>(me_)->WndHandle) != FALSE;
 }
 
 EXPORT_CPP void _wndBaseClientToScreen(SClass* me_, S64* screenX, S64* screenY, S64 clientX, S64 clientY)
@@ -877,7 +951,7 @@ EXPORT_CPP void _wndBaseScreenToClient(SClass* me_, S64* clientX, S64* clientY, 
 
 EXPORT_CPP void _wndMinMax(SClass* me_, S64 minWidth, S64 minHeight, S64 maxWidth, S64 maxHeight)
 {
-	THROWDBG(minWidth != -1 && minWidth <= 0 || minHeight != -1 && minHeight <= 0 || maxWidth != -1 && maxWidth < minWidth || maxHeight != -1 && maxHeight < minHeight, 0xe9170006);
+	THROWDBG(minWidth != -1 && minWidth <= 0 || minHeight != -1 && minHeight <= 0 || maxWidth != -1 && maxWidth < minWidth || maxHeight != -1 && maxHeight < minHeight, EXCPT_DBG_ARG_OUT_DOMAIN);
 	SWnd* me2 = reinterpret_cast<SWnd*>(me_);
 	me2->MinWidth = static_cast<U16>(minWidth);
 	me2->MinHeight = static_cast<U16>(minHeight);
@@ -948,7 +1022,7 @@ EXPORT_CPP Bool _wndFocusedWnd(SClass* me_)
 
 EXPORT_CPP void _wndSetAlpha(SClass* me_, S64 alpha)
 {
-	THROWDBG(alpha < 0 || 255 < alpha, 0xe9170006);
+	THROWDBG(alpha < 0 || 255 < alpha, EXCPT_DBG_ARG_OUT_DOMAIN);
 	SetLayeredWindowAttributes(reinterpret_cast<SWndBase*>(me_)->WndHandle, NULL, static_cast<BYTE>(alpha), LWA_ALPHA);
 }
 
@@ -957,6 +1031,16 @@ EXPORT_CPP S64 _wndGetAlpha(SClass* me_)
 	BYTE alpha;
 	GetLayeredWindowAttributes(reinterpret_cast<SWndBase*>(me_)->WndHandle, NULL, &alpha, NULL);
 	return static_cast<S64>(alpha);
+}
+
+EXPORT_CPP void _wndAcceptDraggedFiles(SClass* me_, Bool is_accepted)
+{
+	DragAcceptFiles(reinterpret_cast<SWndBase*>(me_)->WndHandle, is_accepted ? TRUE : FALSE);
+}
+
+EXPORT_CPP void _wndUpdateMenu(SClass* me_)
+{
+	DrawMenuBar(reinterpret_cast<SWndBase*>(me_)->WndHandle);
 }
 
 EXPORT_CPP void _wndSetModalLock(SClass* me_)
@@ -969,36 +1053,17 @@ EXPORT_CPP void _wndSetModalLock(SClass* me_)
 
 EXPORT_CPP SClass* _makeDraw(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY, Bool equalMagnification)
 {
-	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
-	SDraw* me3 = reinterpret_cast<SDraw*>(me_);
-	SetCtrlParam(me2, reinterpret_cast<SWndBase*>(parent), WndKind_Draw, WC_STATIC, 0, WS_VISIBLE | WS_CHILD | SS_NOTIFY | WS_CLIPCHILDREN, x, y, width, height, L"", WndProcDraw, anchorX, anchorY);
-	me3->EqualMagnification = equalMagnification;
-	me3->DrawTwice = True;
-	me3->Enter = False;
-	me3->WheelX = 0;
-	me3->WheelY = 0;
-	me3->DrawBuf = Draw::MakeDrawBuf(static_cast<int>(width), static_cast<int>(height), static_cast<int>(width), static_cast<int>(height), me2->WndHandle, NULL);
-	me3->OnPaint = NULL;
-	me3->OnMouseDownL = NULL;
-	me3->OnMouseDownR = NULL;
-	me3->OnMouseDownM = NULL;
-	me3->OnMouseDoubleClick = NULL;
-	me3->OnMouseUpL = NULL;
-	me3->OnMouseUpR = NULL;
-	me3->OnMouseUpM = NULL;
-	me3->OnMouseMove = NULL;
-	me3->OnMouseEnter = NULL;
-	me3->OnMouseLeave = NULL;
-	me3->OnMouseWheelX = NULL;
-	me3->OnMouseWheelY = NULL;
-	me3->OnFocus = NULL;
-	me3->OnKeyDown = NULL;
-	me3->OnKeyUp = NULL;
-	me3->OnKeyChar = NULL;
-	me3->OnScrollX = NULL;
-	me3->OnScrollY = NULL;
-	me3->OnSetMouseImg = NULL;
-	return me_;
+	return MakeDrawImpl(me_, parent, x, y, width, height, anchorX, anchorY, equalMagnification, False, 1);
+}
+
+EXPORT_CPP SClass* _makeDrawReduced(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY, Bool equalMagnification, S64 split)
+{
+	return MakeDrawImpl(me_, parent, x, y, width, height, anchorX, anchorY, equalMagnification, False, static_cast<int>(split));
+}
+
+EXPORT_CPP SClass* _makeDrawEditable(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height)
+{
+	return MakeDrawImpl(me_, parent, x, y, width, height, 0, 0, False, True, 1);
 }
 
 EXPORT_CPP void _drawDtor(SClass* me_)
@@ -1062,6 +1127,14 @@ EXPORT_CPP void _drawMoveCaret(SClass* me_, S64 x, S64 y)
 	ImmReleaseContext(wnd_handle, imc);
 }
 
+EXPORT_CPP void _drawMouseCapture(SClass* me_, Bool enabled)
+{
+	if (enabled)
+		SetCapture(reinterpret_cast<SWndBase*>(me_)->WndHandle);
+	else
+		ReleaseCapture();
+}
+
 EXPORT_CPP SClass* _makeBtn(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY, const U8* text)
 {
 	SBtn* me2 = reinterpret_cast<SBtn*>(me_);
@@ -1101,8 +1174,9 @@ EXPORT_CPP SClass* _makeRadio(SClass* me_, SClass* parent, S64 x, S64 y, S64 wid
 EXPORT_CPP SClass* _makeEdit(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
 {
 	SEdit* me2 = reinterpret_cast<SEdit*>(me_);
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_Edit, WC_EDIT, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, x, y, width, height, L"", WndProcEdit, anchorX, anchorY);
+	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_Edit, WC_EDIT, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_NOHIDESEL, x, y, width, height, L"", WndProcEdit, anchorX, anchorY);
 	reinterpret_cast<SEditBase*>(me2)->OnChange = NULL;
+	reinterpret_cast<SEditBase*>(me2)->OnFocus = NULL;
 	return me_;
 }
 
@@ -1112,9 +1186,20 @@ EXPORT_CPP void _editReadonly(SClass* me_, Bool enabled)
 	SendMessage(wnd, EM_SETREADONLY, enabled ? TRUE : FALSE, 0);
 }
 
+EXPORT_CPP void _editRightAligned(SClass* me_, Bool enabled)
+{
+	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
+	DWORD dw_style = GetWindowLong(wnd, GWL_STYLE);
+	if(enabled)
+		SetWindowLong(wnd, GWL_STYLE, dw_style | ES_RIGHT);
+	else
+		SetWindowLong(wnd, GWL_STYLE, dw_style & ~ES_RIGHT);
+	InvalidateRect(wnd, NULL, TRUE);
+}
+
 EXPORT_CPP void _editSetSel(SClass* me_, S64 start, S64 len)
 {
-	THROWDBG(!(len == -1 && (start == -1 || start == 0) || 0 <= start && 0 <= len), 0xe9170006);
+	THROWDBG(!(len == -1 && (start == -1 || start == 0) || 0 <= start && 0 <= len), EXCPT_DBG_ARG_OUT_DOMAIN);
 	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
 	S64 first;
 	S64 last;
@@ -1141,14 +1226,35 @@ EXPORT_CPP void _editSetSel(SClass* me_, S64 start, S64 len)
 
 EXPORT_CPP SClass* _makeEditMulti(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
 {
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_EditMulti, WC_EDIT, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, x, y, width, height, L"", WndProcEditMulti, anchorX, anchorY);
+	SEditMulti* me2 = reinterpret_cast<SEditMulti*>(me_);
+	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_EditMulti, WC_EDIT, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL, x, y, width, height, L"", WndProcEditMulti, anchorX, anchorY);
+	reinterpret_cast<SEditBase*>(me2)->OnChange = NULL;
+	reinterpret_cast<SEditBase*>(me2)->OnFocus = NULL;
 	return me_;
+}
+
+EXPORT_CPP void _editMultiAddText(SClass* me_, const U8* text)
+{
+	const U8* text2 = NToRN(text == NULL ? L"" : reinterpret_cast<const Char*>(text + 0x10));
+	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
+	HWND wnd = me2->WndHandle;
+	Bool redraw_enabled = me2->RedrawEnabled;
+	if (redraw_enabled)
+		SendMessage(wnd, WM_SETREDRAW, FALSE, 0);
+	SendMessage(wnd, EM_SETSEL, 0, static_cast<LPARAM>(-1)); // Select all.
+	SendMessage(wnd, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1)); // Unselect.
+	SendMessage(wnd, WM_SETREDRAW, TRUE, 0);
+	InvalidateRect(wnd, NULL, TRUE);
+	SendMessage(wnd, EM_REPLACESEL, 0, reinterpret_cast<LPARAM>(const_cast<U8*>(text2 + 0x10)));
+	if (!redraw_enabled)
+		SendMessage(wnd, WM_SETREDRAW, FALSE, 0);
+	FreeMem(const_cast<U8*>(text2));
 }
 
 EXPORT_CPP SClass* _makeList(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
 {
 	SList* me2 = reinterpret_cast<SList*>(me_);
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_List, WC_LISTBOX, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | LBS_DISABLENOSCROLL | LBS_NOTIFY, x, y, width, height, L"", WndProcList, anchorX, anchorY);
+	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_List, WC_LISTBOX, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | LBS_DISABLENOSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, x, y, width, height, L"", WndProcList, anchorX, anchorY);
 	me2->OnSel = NULL;
 	me2->OnMouseDoubleClick = NULL;
 	return me_;
@@ -1161,16 +1267,16 @@ EXPORT_CPP void _listClear(SClass* me_)
 
 EXPORT_CPP void _listAdd(SClass* me_, const U8* text)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text + 0x10));
 }
 
 EXPORT_CPP void _listIns(SClass* me_, S64 idx, const U8* text)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 #if defined(DBG)
 	S64 len = _listLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_INSERTSTRING, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(text + 0x10));
 }
@@ -1179,7 +1285,7 @@ EXPORT_CPP void _listDel(SClass* me_, S64 idx)
 {
 #if defined(DBG)
 	S64 len = _listLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_DELETESTRING, static_cast<WPARAM>(idx), 0);
 }
@@ -1193,7 +1299,7 @@ EXPORT_CPP void _listSetSel(SClass* me_, S64 idx)
 {
 #if defined(DBG)
 	S64 len = _listLen(me_);
-	THROWDBG(idx < -1 || len <= idx, 0xe9170006);
+	THROWDBG(idx < -1 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_SETCURSEL, static_cast<WPARAM>(idx), 0);
 }
@@ -1203,12 +1309,27 @@ EXPORT_CPP S64 _listGetSel(SClass* me_)
 	return static_cast<S64>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_GETCURSEL, 0, 0));
 }
 
+EXPORT_CPP void _listSetText(SClass* me_, S64 idx, const U8* text)
+{
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+#if defined(DBG)
+	S64 len = _listLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	{
+		int sel = static_cast<int>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_GETCURSEL, 0, 0));
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_INSERTSTRING, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(text + 0x10));
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_DELETESTRING, static_cast<WPARAM>(idx + 1), 0);
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_SETCURSEL, static_cast<WPARAM>(sel), 0);
+	}
+}
+
 EXPORT_CPP void* _listGetText(SClass* me_, S64 idx)
 {
 #if defined(DBG)
 	{
 		S64 len = _listLen(me_);
-		THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+		THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 	}
 #endif
 	{
@@ -1221,31 +1342,92 @@ EXPORT_CPP void* _listGetText(SClass* me_, S64 idx)
 	}
 }
 
-EXPORT_CPP void _listSetText(SClass* me_, S64 idx, const U8* text)
+EXPORT_CPP SClass* _makeCombo(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_Combo, WC_COMBOBOX, 0, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_AUTOHSCROLL | CBS_DROPDOWNLIST, x, y, width, height, L"", WndProcCombo, anchorX, anchorY);
+	return me_;
+}
+
+EXPORT_CPP void _comboClear(SClass* me_)
+{
+	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_RESETCONTENT, 0, 0);
+}
+
+EXPORT_CPP void _comboAdd(SClass* me_, const U8* text)
+{
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text + 0x10));
+}
+
+EXPORT_CPP void _comboIns(SClass* me_, S64 idx, const U8* text)
+{
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 #if defined(DBG)
-	S64 len = _listLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	S64 len = _comboLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_INSERTSTRING, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(text + 0x10));
+}
+
+EXPORT_CPP void _comboDel(SClass* me_, S64 idx)
+{
+#if defined(DBG)
+	S64 len = _comboLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_DELETESTRING, static_cast<WPARAM>(idx), 0);
+}
+
+EXPORT_CPP S64 _comboLen(SClass* me_)
+{
+	return static_cast<S64>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_GETCOUNT, 0, 0));
+}
+
+EXPORT_CPP void _comboSetSel(SClass* me_, S64 idx)
+{
+#if defined(DBG)
+	S64 len = _comboLen(me_);
+	THROWDBG(idx < -1 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_SETCURSEL, static_cast<WPARAM>(idx), 0);
+}
+
+EXPORT_CPP S64 _comboGetSel(SClass* me_)
+{
+	return static_cast<S64>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_GETCURSEL, 0, 0));
+}
+
+EXPORT_CPP void _comboSetText(SClass* me_, S64 idx, const U8* text)
+{
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+#if defined(DBG)
+	S64 len = _comboLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	{
-		int sel = static_cast<int>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_GETCURSEL, 0, 0));
-		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_INSERTSTRING, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(text + 0x10));
-		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_DELETESTRING, static_cast<WPARAM>(idx + 1), 0);
-		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, LB_SETCURSEL, static_cast<WPARAM>(sel), 0);
+		int sel = static_cast<int>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_GETCURSEL, 0, 0));
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_INSERTSTRING, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(text + 0x10));
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_DELETESTRING, static_cast<WPARAM>(idx + 1), 0);
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_SETCURSEL, static_cast<WPARAM>(sel), 0);
 	}
 }
 
-EXPORT_CPP SClass* _makeCombo(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
+EXPORT_CPP void* _comboGetText(SClass* me_, S64 idx)
 {
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_Combo, WC_COMBOBOX, 0, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_AUTOHSCROLL | CBS_DROPDOWN, x, y, width, height, L"", WndProcCombo, anchorX, anchorY);
-	return me_;
-}
-
-EXPORT_CPP SClass* _makeComboList(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
-{
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_ComboList, WC_COMBOBOX, 0, WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_AUTOHSCROLL | CBS_DROPDOWNLIST, x, y, width, height, L"", WndProcComboList, anchorX, anchorY);
-	return me_;
+#if defined(DBG)
+	{
+		S64 len = _comboLen(me_);
+		THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+	}
+#endif
+	{
+		size_t len = static_cast<size_t>(SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_GETLBTEXTLEN, static_cast<WPARAM>(idx), 0));
+		U8* result = static_cast<U8*>(AllocMem(0x10 + sizeof(Char) * (len + 1)));
+		*reinterpret_cast<S64*>(result + 0x00) = DefaultRefCntFunc;
+		*reinterpret_cast<S64*>(result + 0x08) = static_cast<S64>(len);
+		SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, CB_GETLBTEXT, static_cast<WPARAM>(idx), reinterpret_cast<LPARAM>(result + 0x10));
+		return result;
+	}
 }
 
 EXPORT_CPP SClass* _makeLabel(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY, const U8* text)
@@ -1302,17 +1484,27 @@ EXPORT_CPP SClass* _makeLabelLink(SClass* me_, SClass* parent, S64 x, S64 y, S64
 	return me_;
 }
 
-EXPORT_CPP SClass* _makeListView(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
+EXPORT_CPP SClass* _makeListView(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY, Bool multi_sel, const void* small_imgs, const void* large_imgs)
 {
 	SListView* me2 = reinterpret_cast<SListView*>(me_);
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_ListView, WC_LISTVIEW, 0, WS_VISIBLE | WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER, x, y, width, height, L"", WndProcListView, anchorX, anchorY);
+	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_ListView, WC_LISTVIEW, 0, WS_VISIBLE | WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_NOSORTHEADER | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS | (multi_sel ? 0 : LVS_SINGLESEL), x, y, width, height, L"", WndProcListView, anchorX, anchorY);
 	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
 	DWORD ex = ListView_GetExtendedListViewStyle(wnd);
-	ListView_SetExtendedListViewStyle(wnd, ex | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+	ListView_SetExtendedListViewStyle(wnd, ex | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_SUBITEMIMAGES);
 	SetWindowLongPtr(ListView_GetHeader(wnd), GWLP_USERDATA, reinterpret_cast<LONG_PTR>(me_));
 	me2->OnSel = NULL;
 	me2->OnMouseDoubleClick = NULL;
 	me2->OnMouseClick = NULL;
+	me2->OnMoveNode = NULL;
+	me2->Draggable = False;
+	me2->Dragging = False;
+	me2->DraggingImage = NULL;
+
+	if (small_imgs != NULL)
+		ListView_SetImageList(wnd, CreateImageList(small_imgs), LVSIL_SMALL);
+	if (large_imgs != NULL)
+		ListView_SetImageList(wnd, CreateImageList(large_imgs), LVSIL_NORMAL);
+
 	return me_;
 }
 
@@ -1322,29 +1514,33 @@ EXPORT_CPP void _listViewClear(SClass* me_)
 	ListView_DeleteAllItems(me2->WndHandle);
 }
 
-EXPORT_CPP void _listViewAdd(SClass* me_, const U8* text)
+EXPORT_CPP void _listViewAdd(SClass* me_, const U8* text, S64 img)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(img < -1, EXCPT_DBG_ARG_OUT_DOMAIN);
 	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
 	LVITEM item;
-	item.mask = LVIF_TEXT;
+	item.mask = LVIF_TEXT | LVIF_IMAGE;
 	item.iItem = ListView_GetItemCount(wnd);
 	item.iSubItem = 0;
+	item.iImage = static_cast<int>(img);
 	item.pszText = const_cast<Char*>(reinterpret_cast<const Char*>(text + 0x10));
 	ListView_InsertItem(wnd, &item);
 }
 
-EXPORT_CPP void _listViewIns(SClass* me_, S64 idx, const U8* text)
+EXPORT_CPP void _listViewIns(SClass* me_, S64 idx, const U8* text, S64 img)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(img < -1, EXCPT_DBG_ARG_OUT_DOMAIN);
 #if defined(DBG)
 	S64 len = _listViewLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	LVITEM item;
-	item.mask = LVIF_TEXT;
+	item.mask = LVIF_TEXT | LVIF_IMAGE;
 	item.iItem = static_cast<int>(idx);
 	item.iSubItem = 0;
+	item.iImage = static_cast<int>(img);
 	item.pszText = const_cast<Char*>(reinterpret_cast<const Char*>(text + 0x10));
 	ListView_InsertItem(reinterpret_cast<SWndBase*>(me_)->WndHandle, &item);
 }
@@ -1353,7 +1549,7 @@ EXPORT_CPP void _listViewDel(SClass* me_, S64 idx)
 {
 #if defined(DBG)
 	S64 len = _listViewLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	ListView_DeleteItem(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx));
 }
@@ -1365,7 +1561,7 @@ EXPORT_CPP S64 _listViewLen(SClass* me_)
 
 EXPORT_CPP void _listViewAddColumn(SClass* me_, const U8* text)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
 	LVCOLUMN lvcolumn;
 	lvcolumn.mask = LVCF_TEXT;
@@ -1376,10 +1572,10 @@ EXPORT_CPP void _listViewAddColumn(SClass* me_, const U8* text)
 
 EXPORT_CPP void _listViewInsColumn(SClass* me_, S64 column, const U8* text)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 #if defined(DBG)
 	S64 len = _listViewLenColumn(me_);
-	THROWDBG(column < 0 || len <= column, 0xe9170006);
+	THROWDBG(column < 0 || len <= column, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	HWND wnd = reinterpret_cast<SWndBase*>(me_)->WndHandle;
 	LVCOLUMN lvcolumn;
@@ -1393,51 +1589,70 @@ EXPORT_CPP void _listViewDelColumn(SClass* me_, S64 column)
 {
 #if defined(DBG)
 	S64 len = _listViewLenColumn(me_);
-	THROWDBG(column < 0 || len <= column, 0xe9170006);
+	THROWDBG(column < 0 || len <= column, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	ListView_DeleteColumn(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(column));
 }
 
 EXPORT_CPP S64 _listViewLenColumn(SClass* me_)
 {
-	return static_cast<S64>(Header_GetItemCount(ListView_GetHeader(reinterpret_cast<SWndBase*>(me_)->WndHandle)));
+	S64 len = static_cast<S64>(Header_GetItemCount(ListView_GetHeader(reinterpret_cast<SWndBase*>(me_)->WndHandle)));
+	if (len == 0)
+		len = 1;
+	return len;
 }
 
-EXPORT_CPP void _listViewClearColumn(SClass* me_)
+EXPORT_CPP void _listViewClearAll(SClass* me_)
 {
 	S64 len = _listViewLenColumn(me_);
 	for (S64 i = 0; i < len; i++)
 		_listViewDelColumn(me_, 0);
+	_listViewClear(me_);
 }
 
-EXPORT_CPP void _listViewSetText(SClass* me_, S64 idx, S64 column, const U8* text)
+EXPORT_CPP void _listViewSetText(SClass* me_, S64 idx, S64 column, const U8* text, S64 img)
 {
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(img < -1, EXCPT_DBG_ARG_OUT_DOMAIN);
 #if defined(DBG)
 	S64 len = _listViewLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 	len = _listViewLenColumn(me_);
-	THROWDBG(column < 0 || len <= column, 0xe9170006);
+	THROWDBG(column < 0 || len <= column, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
-	ListView_SetItemText(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx), static_cast<int>(column), const_cast<Char*>(reinterpret_cast<const Char*>(text + 0x10)));
+	LVITEM item;
+	item.mask = LVIF_TEXT | LVIF_IMAGE;
+	item.iItem = static_cast<int>(idx);
+	item.iSubItem = static_cast<int>(column);
+	item.iImage = static_cast<int>(img);
+	item.pszText = const_cast<Char*>(reinterpret_cast<const Char*>(text + 0x10));
+	ListView_SetItem(reinterpret_cast<SWndBase*>(me_)->WndHandle, &item);
 }
 
-EXPORT_CPP void* _listViewGetText(SClass* me_, S64 idx, S64 column)
+EXPORT_CPP void* _listViewGetText(SClass* me_, S64* img, S64 idx, S64 column)
 {
 #if defined(DBG)
 	S64 len = _listViewLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 	len = _listViewLenColumn(me_);
-	THROWDBG(column < 0 || len <= column, 0xe9170006);
+	THROWDBG(column < 0 || len <= column, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	Char buf[1025];
-	ListView_GetItemText(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx), static_cast<int>(column), buf, 1025);
+	LVITEM item;
+	item.mask = LVIF_TEXT | LVIF_IMAGE;
+	item.iItem = static_cast<int>(idx);
+	item.iSubItem = static_cast<int>(column);
+	item.pszText = buf;
+	item.cchTextMax = 1025;
+	item.iImage = -1;
+	ListView_GetItem(reinterpret_cast<SWndBase*>(me_)->WndHandle, &item);
 	buf[1024] = L'\0';
 	size_t len2 = wcslen(buf);
 	U8* result = static_cast<U8*>(AllocMem(0x10 + sizeof(Char) * static_cast<size_t>(len2 + 1)));
 	*reinterpret_cast<S64*>(result + 0x00) = DefaultRefCntFunc;
 	*reinterpret_cast<S64*>(result + 0x08) = static_cast<S64>(len2);
 	memcpy(result + 0x10, buf, sizeof(Char) * static_cast<size_t>(len2 + 1));
+	*img = static_cast<S64>(item.iImage);
 	return result;
 }
 
@@ -1450,7 +1665,7 @@ EXPORT_CPP void _listViewSetSel(SClass* me_, S64 idx)
 {
 #if defined(DBG)
 	S64 len = _listViewLen(me_);
-	THROWDBG(idx < 0 || len <= idx, 0xe9170006);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 #endif
 	ListView_SetItemState(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx), LVIS_SELECTED, LVIS_SELECTED);
 }
@@ -1458,6 +1673,51 @@ EXPORT_CPP void _listViewSetSel(SClass* me_, S64 idx)
 EXPORT_CPP S64 _listViewGetSel(SClass* me_)
 {
 	return static_cast<S64>(ListView_GetNextItem(reinterpret_cast<SWndBase*>(me_)->WndHandle, -1, LVNI_ALL | LVNI_SELECTED));
+}
+
+EXPORT_CPP void _listViewSetSelMulti(SClass* me_, S64 idx, Bool value)
+{
+#if defined(DBG)
+	S64 len = _listViewLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	ListView_SetItemState(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx), LVIS_SELECTED, value ? LVIS_SELECTED : 0);
+}
+
+EXPORT_CPP Bool _listViewGetSelMulti(SClass* me_, S64 idx)
+{
+#if defined(DBG)
+	S64 len = _listViewLen(me_);
+	THROWDBG(idx < 0 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
+#endif
+	return ListView_GetItemState(reinterpret_cast<SWndBase*>(me_)->WndHandle, static_cast<int>(idx), LVIS_SELECTED) != 0;
+}
+
+EXPORT_CPP void _listViewStyle(SClass* me_, S64 list_view_style)
+{
+	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
+	DWORD dw_style = GetWindowLong(me2->WndHandle, GWL_STYLE);
+	const LONG normal_mask = LVS_TYPEMASK | LVS_NOCOLUMNHEADER;
+	SetWindowLong(me2->WndHandle, GWL_STYLE, (dw_style & ~normal_mask) | (static_cast<LONG>(list_view_style) & normal_mask));
+	DWORD ex = ListView_GetExtendedListViewStyle(me2->WndHandle);
+	const LONG ex_mask = LVS_EX_CHECKBOXES;
+	ListView_SetExtendedListViewStyle(me2->WndHandle, (ex & ~ex_mask) | (static_cast<LONG>(list_view_style) & ex_mask));
+	InvalidateRect(me2->WndHandle, NULL, TRUE);
+}
+
+EXPORT_CPP void _listViewDraggable(SClass* me_, bool enabled)
+{
+	reinterpret_cast<SListView*>(me_)->Draggable = enabled;
+}
+
+EXPORT_CPP void _listViewSetChk(SClass* me_, S64 idx, bool value)
+{
+	ListView_SetCheckState(reinterpret_cast<SWndBase*>(me_)->WndHandle, idx, value ? TRUE : FALSE);
+}
+
+EXPORT_CPP Bool _listViewGetChk(SClass* me_, S64 idx)
+{
+	return ListView_GetCheckState(reinterpret_cast<SWndBase*>(me_)->WndHandle, idx) != 0;
 }
 
 EXPORT_CPP SClass* _makePager(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
@@ -1493,7 +1753,7 @@ EXPORT_CPP void _tabSetSel(SClass* me_, S64 idx)
 #if defined(DBG)
 	{
 		S64 len = _tabLen(me_);
-		THROWDBG(idx < -1 || len <= idx, 0xe9170006);
+		THROWDBG(idx < -1 || len <= idx, EXCPT_DBG_ARG_OUT_DOMAIN);
 	}
 #endif
 	SendMessage(reinterpret_cast<SWndBase*>(me_)->WndHandle, TCM_SETCURSEL, static_cast<WPARAM>(idx), 0);
@@ -1521,23 +1781,11 @@ EXPORT_CPP SClass* _makeTree(SClass* me_, SClass* parent, S64 x, S64 y, S64 widt
 {
 	STree* me2 = reinterpret_cast<STree*>(me_);
 	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_Tree, WC_TREEVIEW, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | TVS_HASBUTTONS | TVS_HASLINES | TVS_SHOWSELALWAYS | TVS_LINESATROOT, x, y, width, height, L"", WndProcTree, anchorX, anchorY);
-	reinterpret_cast<STreeBase*>(me2)->Draggable = False;
-	reinterpret_cast<STreeBase*>(me2)->AllowDraggingToRoot = False;
-	reinterpret_cast<STreeBase*>(me2)->DraggingItem = NULL;
-	reinterpret_cast<STreeBase*>(me2)->OnSel = NULL;
-	reinterpret_cast<STreeBase*>(me2)->OnMoveNode = NULL;
-	return me_;
-}
-
-EXPORT_CPP SClass* _makeTreeMulti(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchorX, S64 anchorY)
-{
-	STree* me2 = reinterpret_cast<STree*>(me_);
-	SetCtrlParam(reinterpret_cast<SWndBase*>(me_), reinterpret_cast<SWndBase*>(parent), WndKind_TreeMulti, WC_TREEVIEW, WS_EX_CLIENTEDGE, WS_VISIBLE | WS_CHILD | TVS_HASBUTTONS | TVS_HASLINES | TVS_SHOWSELALWAYS | TVS_LINESATROOT, x, y, width, height, L"", WndProcTree, anchorX, anchorY);
-	reinterpret_cast<STreeBase*>(me2)->Draggable = False;
-	reinterpret_cast<STreeBase*>(me2)->AllowDraggingToRoot = False;
-	reinterpret_cast<STreeBase*>(me2)->DraggingItem = NULL;
-	reinterpret_cast<STreeBase*>(me2)->OnSel = NULL;
-	reinterpret_cast<STreeBase*>(me2)->OnMoveNode = NULL;
+	me2->Draggable = False;
+	me2->AllowDraggingToRoot = False;
+	me2->DraggingItem = NULL;
+	me2->OnSel = NULL;
+	me2->OnMoveNode = NULL;
 	return me_;
 }
 
@@ -1566,19 +1814,19 @@ EXPORT_CPP SClass* _treeRoot(SClass* me_, SClass* me2)
 
 EXPORT_CPP void _treeDraggable(SClass* me_, Bool enabled)
 {
-	reinterpret_cast<STreeBase*>(me_)->Draggable = enabled;
+	reinterpret_cast<STree*>(me_)->Draggable = enabled;
 }
 
 EXPORT_CPP void _treeAllowDraggingToRoot(SClass* me_, Bool enabled)
 {
-	reinterpret_cast<STreeBase*>(me_)->AllowDraggingToRoot = enabled;
+	reinterpret_cast<STree*>(me_)->AllowDraggingToRoot = enabled;
 }
 
 EXPORT_CPP void _treeSetSel(SClass* me_, SClass* node)
 {
 	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
 	STreeNode* node2 = reinterpret_cast<STreeNode*>(node);
-	THROWDBG(me2->WndHandle != node2->WndHandle, 0xe9170006);
+	THROWDBG(me2->WndHandle != node2->WndHandle, EXCPT_DBG_ARG_OUT_DOMAIN);
 	TreeView_Select(me2->WndHandle, node2->Item, TVGN_CARET);
 }
 
@@ -1593,38 +1841,9 @@ EXPORT_CPP SClass* _treeGetSel(SClass* me_, SClass* me2)
 	return me2;
 }
 
-EXPORT_CPP void _treeMultiSetSel(SClass* me_, void* nodes)
-{
-	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
-	S64 len = *(S64*)((U8*)nodes + 0x08);
-	void** ptr = (void**)((U8*)nodes + 0x10);
-	S64 i;
-	for (i = 0; i < len; i++)
-	{
-		STreeNode* node2 = reinterpret_cast<STreeNode*>(ptr[i]);
-		THROWDBG(me2->WndHandle != node2->WndHandle, 0xe9170006);
-		if (i == 0)
-			TreeView_Select(me2->WndHandle, node2->Item, TVGN_CARET);
-		else
-			TreeView_SetItemState(me2->WndHandle, node2->Item, TVIS_SELECTED, TVIS_SELECTED);
-	}
-}
-
-EXPORT_CPP SClass* _treeMultiGetSel(SClass* me_, SClass* me2, SClass* node)
-{
-	SWndBase* me3 = reinterpret_cast<SWndBase*>(me_);
-	STreeNode* me4 = reinterpret_cast<STreeNode*>(me2);
-	STreeNode* node2 = reinterpret_cast<STreeNode*>(node);
-	me4->WndHandle = me3->WndHandle;
-	me4->Item = TreeView_GetNextItem(me3->WndHandle, node2 == NULL ? NULL : node2->Item, node2 == NULL ? TVGN_CARET : TVGN_NEXTSELECTED);
-	if (me4->Item == NULL)
-		return NULL;
-	return me2;
-}
-
 EXPORT_CPP SClass* _treeNodeAddChild(SClass* me_, SClass* me2, const U8* name)
 {
-	THROWDBG(name == NULL, 0xc0000005);
+	THROWDBG(name == NULL, EXCPT_ACCESS_VIOLATION);
 	STreeNode* me3 = reinterpret_cast<STreeNode*>(me_);
 	STreeNode* me4 = reinterpret_cast<STreeNode*>(me2);
 	TVINSERTSTRUCT tvis;
@@ -1641,8 +1860,8 @@ EXPORT_CPP SClass* _treeNodeAddChild(SClass* me_, SClass* me2, const U8* name)
 
 EXPORT_CPP SClass* _treeNodeInsChild(SClass* me_, SClass* me2, SClass* node, const U8* name)
 {
-	THROWDBG(node == NULL, 0xc0000005);
-	THROWDBG(name == NULL, 0xc0000005);
+	THROWDBG(node == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(name == NULL, EXCPT_ACCESS_VIOLATION);
 	STreeNode* me3 = reinterpret_cast<STreeNode*>(me_);
 	STreeNode* me4 = reinterpret_cast<STreeNode*>(me2);
 	STreeNode* node2 = reinterpret_cast<STreeNode*>(node);
@@ -1661,7 +1880,7 @@ EXPORT_CPP SClass* _treeNodeInsChild(SClass* me_, SClass* me2, SClass* node, con
 
 EXPORT_CPP void _treeNodeDelChild(SClass* me_, SClass* node)
 {
-	THROWDBG(node == NULL, 0xc0000005);
+	THROWDBG(node == NULL, EXCPT_ACCESS_VIOLATION);
 	STreeNode* me3 = reinterpret_cast<STreeNode*>(me_);
 	STreeNode* node2 = reinterpret_cast<STreeNode*>(node);
 	if (node2->Item == NULL)
@@ -1811,7 +2030,7 @@ EXPORT_CPP SClass* _makeMenu(SClass* me_)
 	SMenu* me2 = reinterpret_cast<SMenu*>(me_);
 	me2->MenuHandle = CreateMenu();
 	if (me2->MenuHandle == NULL)
-		THROW(0xe9170009);
+		THROW(EXCPT_DEVICE_INIT_FAILED);
 	me2->Children = AllocMem(0x28);
 	*(S64*)me2->Children = 1;
 	memset((U8*)me2->Children + 0x08, 0x00, 0x20);
@@ -1825,8 +2044,8 @@ EXPORT_CPP void _menuDtor(SClass* me_)
 
 EXPORT_CPP void _menuAdd(SClass* me_, S64 id, const U8* text)
 {
-	THROWDBG(id < 0x0001 || 0xffff < id, 0xe9170006);
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(id < 0x0001 || 0xffff < id, EXCPT_DBG_ARG_OUT_DOMAIN);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 	AppendMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, MF_ENABLED | MF_STRING, static_cast<UINT_PTR>(id), reinterpret_cast<const Char*>(text + 0x10));
 }
 
@@ -1837,9 +2056,39 @@ EXPORT_CPP void _menuAddLine(SClass* me_)
 
 EXPORT_CPP void _menuAddPopup(SClass* me_, const U8* text, const U8* popup)
 {
-	THROWDBG(popup == NULL, 0xc0000005);
-	THROWDBG(text == NULL, 0xc0000005);
+	THROWDBG(popup == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
 	AppendMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, MF_ENABLED | MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(reinterpret_cast<const SMenu*>(popup)->MenuHandle), reinterpret_cast<const Char*>(text + 0x10));
+}
+
+EXPORT_CPP void _menuIns(SClass* me_, S64 targetId, S64 id, const U8* text)
+{
+	THROWDBG(targetId < 0x0001 || 0xffff < targetId, EXCPT_DBG_ARG_OUT_DOMAIN);
+	THROWDBG(id < 0x0001 || 0xffff < id, EXCPT_DBG_ARG_OUT_DOMAIN);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	InsertMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, static_cast<UINT>(targetId), MF_ENABLED | MF_STRING, static_cast<UINT_PTR>(id), reinterpret_cast<const Char*>(text + 0x10));
+}
+
+EXPORT_CPP void _menuInsPopup(SClass* me_, const U8* target, const U8* text, const U8* popup)
+{
+	THROWDBG(target == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(popup == NULL, EXCPT_ACCESS_VIOLATION);
+	THROWDBG(text == NULL, EXCPT_ACCESS_VIOLATION);
+	// This cast is due to bad specifications of Windows API.
+	InsertMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, static_cast<UINT>(reinterpret_cast<UINT_PTR>(reinterpret_cast<const SMenu*>(target)->MenuHandle)), MF_ENABLED | MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(reinterpret_cast<const SMenu*>(popup)->MenuHandle), reinterpret_cast<const Char*>(text + 0x10));
+}
+
+EXPORT_CPP void _menuDel(SClass* me_, S64 id)
+{
+	THROWDBG(id < 0x0001 || 0xffff < id, EXCPT_DBG_ARG_OUT_DOMAIN);
+	RemoveMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, static_cast<UINT>(id), MF_BYCOMMAND);
+}
+
+EXPORT_CPP void _menuDelPopup(SClass* me_, const U8* popup)
+{
+	THROWDBG(popup == NULL, EXCPT_ACCESS_VIOLATION);
+	// This cast is due to bad specifications of Windows API.
+	RemoveMenu(reinterpret_cast<SMenu*>(me_)->MenuHandle, static_cast<UINT>(reinterpret_cast<UINT_PTR>(reinterpret_cast<const SMenu*>(popup)->MenuHandle)), MF_BYCOMMAND);
 }
 
 EXPORT_CPP SClass* _makePopup(SClass* me_)
@@ -1847,7 +2096,7 @@ EXPORT_CPP SClass* _makePopup(SClass* me_)
 	SMenu* me2 = reinterpret_cast<SMenu*>(me_);
 	me2->MenuHandle = CreatePopupMenu();
 	if (me2->MenuHandle == NULL)
-		THROW(0xe9170009);
+		THROW(EXCPT_DEVICE_INIT_FAILED);
 	me2->Children = AllocMem(0x28);
 	*(S64*)me2->Children = 1;
 	memset((U8*)me2->Children + 0x08, 0x00, 0x20);
@@ -1857,7 +2106,7 @@ EXPORT_CPP SClass* _makePopup(SClass* me_)
 EXPORT_CPP SClass* _makeTabOrder(SClass* me_, U8* ctrls)
 {
 	STabOrder* me2 = reinterpret_cast<STabOrder*>(me_);
-	THROWDBG(ctrls == NULL, 0xc0000005);
+	THROWDBG(ctrls == NULL, EXCPT_ACCESS_VIOLATION);
 	S64 len = *reinterpret_cast<S64*>(ctrls + 0x08);
 	void** ptr = reinterpret_cast<void**>(ctrls + 0x10);
 	void* result = AllocMem(0x10 + sizeof(void*) * static_cast<size_t>(len));
@@ -2000,7 +2249,7 @@ static const U8* RNToN(const Char* str)
 
 static void ParseAnchor(SWndBase* wnd, S64 anchor_x, S64 anchor_y, S64 x, S64 y, S64 width, S64 height)
 {
-	THROWDBG(x != static_cast<S64>(static_cast<U16>(x)) || y != static_cast<S64>(static_cast<U16>(y)) || width != static_cast<S64>(static_cast<U16>(width)) || height != static_cast<S64>(static_cast<U16>(height)), 0xe9170006);
+	THROWDBG(x != static_cast<S64>(static_cast<U16>(x)) || y != static_cast<S64>(static_cast<U16>(y)) || width != static_cast<S64>(static_cast<U16>(width)) || height != static_cast<S64>(static_cast<U16>(height)), EXCPT_DBG_ARG_OUT_DOMAIN);
 	wnd->CtrlFlag = 0;
 	switch (anchor_x)
 	{
@@ -2015,7 +2264,7 @@ static void ParseAnchor(SWndBase* wnd, S64 anchor_x, S64 anchor_y, S64 x, S64 y,
 			wnd->CtrlFlag |= static_cast<U64>(CtrlFlag_AnchorRight);
 			break;
 		default:
-			THROWDBG(True, 0xe9170006);
+			THROWDBG(True, EXCPT_DBG_ARG_OUT_DOMAIN);
 			break;
 	}
 	switch (anchor_y)
@@ -2031,7 +2280,7 @@ static void ParseAnchor(SWndBase* wnd, S64 anchor_x, S64 anchor_y, S64 x, S64 y,
 			wnd->CtrlFlag |= static_cast<U64>(CtrlFlag_AnchorBottom);
 			break;
 		default:
-			THROWDBG(True, 0xe9170006);
+			THROWDBG(True, EXCPT_DBG_ARG_OUT_DOMAIN);
 			break;
 	}
 	wnd->DefaultX = static_cast<U16>(x);
@@ -2048,15 +2297,16 @@ static SWndBase* ToWnd(HWND wnd)
 
 static void SetCtrlParam(SWndBase* wnd, SWndBase* parent, EWndKind kind, const Char* ctrl, DWORD style_ex, DWORD style, S64 x, S64 y, S64 width, S64 height, const Char* text, WNDPROC wnd_proc, S64 anchor_x, S64 anchor_y)
 {
-	THROWDBG(parent == NULL, 0xe9170006);
-	THROWDBG(x < 0 || y < 0 || width < 0 || height < 0, 0xe9170006);
+	THROWDBG(parent == NULL, EXCPT_DBG_ARG_OUT_DOMAIN);
+	THROWDBG(x < 0 || y < 0 || width < 0 || height < 0, EXCPT_DBG_ARG_OUT_DOMAIN);
 	wnd->Kind = kind;
 	wnd->WndHandle = CreateWindowEx(style_ex, ctrl, text, style, static_cast<int>(x), static_cast<int>(y), static_cast<int>(width), static_cast<int>(height), parent->WndHandle, NULL, Instance, NULL);
 	if (wnd->WndHandle == NULL)
-		THROW(0xe9170009);
+		THROW(EXCPT_DEVICE_INIT_FAILED);
 	SetWindowLongPtr(wnd->WndHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(wnd));
 	wnd->Name = NULL;
 	wnd->DefaultWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtr(wnd->WndHandle, GWLP_WNDPROC));
+	wnd->RedrawEnabled = True;
 	wnd->Children = AllocMem(0x28);
 	*(S64*)wnd->Children = 1;
 	memset((U8*)wnd->Children + 0x08, 0x00, 0x20);
@@ -2181,6 +2431,7 @@ static void CommandAndNotify(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
 				}
 				break;
 			case WndKind_Edit:
+			case WndKind_EditMulti:
 				{
 					SEdit* edit = reinterpret_cast<SEdit*>(wnd_ctrl2);
 					switch (HIWORD(w_param))
@@ -2188,16 +2439,17 @@ static void CommandAndNotify(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
 						case EN_CHANGE:
 							if (reinterpret_cast<SEditBase*>(edit)->OnChange != NULL)
 								Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), reinterpret_cast<SEditBase*>(edit)->OnChange);
-							// TODO:
 							break;
 						case EN_HSCROLL:
 							// TODO:
 							break;
 						case EN_KILLFOCUS:
-							// TODO:
+							if (reinterpret_cast<SEditBase*>(edit)->OnFocus != NULL)
+								Call2Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), reinterpret_cast<void*>(static_cast<U64>(False)), reinterpret_cast<SEditBase*>(edit)->OnFocus);
 							break;
 						case EN_SETFOCUS:
-							// TODO:
+							if (reinterpret_cast<SEditBase*>(edit)->OnFocus != NULL)
+								Call2Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), reinterpret_cast<void*>(static_cast<U64>(True)), reinterpret_cast<SEditBase*>(edit)->OnFocus);
 							break;
 						case EN_UPDATE:
 							// TODO:
@@ -2274,9 +2526,8 @@ static void CommandAndNotify(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
 					}
 					break;
 				case WndKind_Tree:
-				case WndKind_TreeMulti:
 					{
-						STreeBase* tree = reinterpret_cast<STreeBase*>(wnd_ctrl2);
+						STree* tree = reinterpret_cast<STree*>(wnd_ctrl2);
 						switch (reinterpret_cast<LPNMHDR>(l_param)->code)
 						{
 							case TVN_BEGINDRAG:
@@ -2291,22 +2542,8 @@ static void CommandAndNotify(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
 								}
 								break;
 							case TVN_SELCHANGED:
-								if (wnd_ctrl2->Kind == WndKind_Tree)
-								{
-									if (tree->OnSel != NULL)
-										Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), tree->OnSel);
-								}
-								break;
-							case TVN_ITEMCHANGED:
-								if (wnd_ctrl2->Kind == WndKind_TreeMulti)
-								{
-									if (tree->OnSel != NULL)
-									{
-										NMTVITEMCHANGE* param = reinterpret_cast<NMTVITEMCHANGE*>(l_param);
-										if ((param->uStateOld & TVIS_SELECTED) != (param->uStateNew & TVIS_SELECTED))
-											Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), tree->OnSel);
-									}
-								}
+								if (tree->OnSel != NULL)
+									Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), tree->OnSel);
 								break;
 						}
 					}
@@ -2328,6 +2565,21 @@ static void CommandAndNotify(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
 								if (list_view->OnMouseClick != NULL)
 									Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd_ctrl2)), list_view->OnMouseClick);
 								break;
+							case LVN_BEGINDRAG:
+								if (list_view->Draggable)
+								{
+									NMLISTVIEW* param = reinterpret_cast<NMLISTVIEW*>(l_param);
+									POINT pt_pos = { 0 };
+									list_view->DraggingImage = ListView_CreateDragImage(wnd_ctrl, param->iItem, &pt_pos);
+									POINT pt;
+									GetCursorPos(&pt);
+									ScreenToClient(wnd_ctrl, &pt);
+									ImageList_BeginDrag(list_view->DraggingImage, 0, pt.x - pt_pos.x, pt.y - pt_pos.y);
+									ImageList_DragEnter(wnd_ctrl, 0, 0);
+									SetCapture(wnd_ctrl);
+									list_view->Dragging = True;
+								}
+								break;
 						}
 					}
 					break;
@@ -2344,7 +2596,7 @@ static Char* ParseFilter(const U8* filter, int* num)
 		return NULL;
 	}
 	S64 len_parent = *reinterpret_cast<const S64*>(filter + 0x08);
-	THROWDBG(len_parent % 2 != 0, 0xe9170006);
+	THROWDBG(len_parent % 2 != 0, EXCPT_DBG_ARG_OUT_DOMAIN);
 	S64 total = 0;
 	{
 		const void*const* ptr = reinterpret_cast<const void*const*>(filter + 0x10);
@@ -2374,16 +2626,13 @@ static Char* ParseFilter(const U8* filter, int* num)
 
 static void TreeExpandAllRecursion(HWND wnd_handle, HTREEITEM node, int flag)
 {
-	HTREEITEM child = TreeView_GetChild(wnd_handle, node);
-	if (child != NULL)
-		TreeExpandAllRecursion(wnd_handle, child, flag);
 	TreeView_Expand(wnd_handle, node, flag);
-	for (; ; )
+
+	HTREEITEM child = TreeView_GetChild(wnd_handle, node);
+	while (child != NULL)
 	{
-		node = TreeView_GetNextSibling(wnd_handle, node);
-		if (node == NULL)
-			break;
-		TreeExpandAllRecursion(wnd_handle, node, flag);
+		TreeExpandAllRecursion(wnd_handle, child, flag);
+		child = TreeView_GetNextSibling(wnd_handle, node);
 	}
 }
 
@@ -2421,13 +2670,93 @@ static void ListViewAdjustWidth(HWND wnd)
 		ListView_SetColumnWidth(wnd, i, LVSCW_AUTOSIZE_USEHEADER);
 }
 
-static LRESULT CALLBACK WndProcWndNormal(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
+static SClass* MakeDrawImpl(SClass* me_, SClass* parent, S64 x, S64 y, S64 width, S64 height, S64 anchor_x, S64 anchor_y, Bool equal_magnification, Bool editable, int split)
 {
-	SWndBase* wnd2 = ToWnd(wnd);
-	SWnd* wnd3 = reinterpret_cast<SWnd*>(wnd2);
-	if (wnd2 == NULL)
-		return DefWindowProc(wnd, msg, w_param, l_param);
-	ASSERT(wnd2->Kind == WndKind_WndNormal);
+	SWndBase* me2 = reinterpret_cast<SWndBase*>(me_);
+	SDraw* me3 = reinterpret_cast<SDraw*>(me_);
+	SetCtrlParam(me2, reinterpret_cast<SWndBase*>(parent), WndKind_Draw, WC_STATIC, 0, WS_VISIBLE | WS_CHILD | SS_NOTIFY | WS_CLIPCHILDREN, x, y, width, height, L"", WndProcDraw, anchor_x, anchor_y);
+	me3->EqualMagnification = equal_magnification;
+	me3->DrawTwice = True;
+	me3->Enter = False;
+	me3->Editable = editable;
+	me3->WheelX = 0;
+	me3->WheelY = 0;
+	if (equal_magnification)
+	{
+		RECT rect;
+		GetWindowRect(me2->WndHandle, &rect);
+		int width2 = static_cast<int>(rect.right - rect.left);
+		int height2 = static_cast<int>(rect.bottom - rect.top);
+		me3->DrawBuf = Draw::MakeDrawBuf(width2, height2, 1, me2->WndHandle, NULL, editable);
+	}
+	else
+		me3->DrawBuf = Draw::MakeDrawBuf(static_cast<int>(width), static_cast<int>(height), split, me2->WndHandle, NULL, editable);
+	me3->OnPaint = NULL;
+	me3->OnMouseDownL = NULL;
+	me3->OnMouseDownR = NULL;
+	me3->OnMouseDownM = NULL;
+	me3->OnMouseDoubleClick = NULL;
+	me3->OnMouseUpL = NULL;
+	me3->OnMouseUpR = NULL;
+	me3->OnMouseUpM = NULL;
+	me3->OnMouseMove = NULL;
+	me3->OnMouseEnter = NULL;
+	me3->OnMouseLeave = NULL;
+	me3->OnMouseWheelX = NULL;
+	me3->OnMouseWheelY = NULL;
+	me3->OnFocus = NULL;
+	me3->OnKeyDown = NULL;
+	me3->OnKeyUp = NULL;
+	me3->OnKeyChar = NULL;
+	me3->OnScrollX = NULL;
+	me3->OnScrollY = NULL;
+	me3->OnSetMouseImg = NULL;
+	return me_;
+}
+
+static HIMAGELIST CreateImageList(const void* imgs)
+{
+	S64 len = static_cast<const S64*>(imgs)[1];
+	HIMAGELIST result = NULL;
+	const void*const* ptr = reinterpret_cast<void*const*>(static_cast<const U8*>(imgs) + 0x10);
+	for (S64 i = 0; i < len; i++)
+	{
+		const Char* path = reinterpret_cast<const Char*>(static_cast<const U8*>(ptr[i]) + 0x10);
+		size_t size;
+		void* bin = LoadFileAll(path, &size);
+		int width;
+		int height;
+		void* img = DecodePng(size, bin, &width, &height);
+		if (result == NULL)
+			result = ImageList_Create(width, height, ILC_COLOR32, static_cast<int>(len), 0);
+		BITMAPINFO info = { 0 };
+		info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		info.bmiHeader.biBitCount = 32;
+		info.bmiHeader.biPlanes = 1;
+		info.bmiHeader.biWidth = static_cast<LONG>(width);
+		info.bmiHeader.biHeight = static_cast<LONG>(height);
+		void* raw;
+		HBITMAP bitmap = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, &raw, NULL, 0);
+		U32* dst = static_cast<U32*>(raw);
+		const U32* src = static_cast<U32*>(img);
+		for (int j = 0; j < height; j++)
+		{
+			for (int k = 0; k < width; k++)
+			{
+				const U32 color = src[(height - 1 - j) * width + k];
+				dst[j * width + k] = (color & 0xff000000) | ((color & 0xff0000) >> 16) | (color & 0xff00) | ((color & 0xff) << 16);
+			}
+		}
+		ImageList_Add(result, bitmap, NULL);
+		DeleteObject(bitmap);
+		FreeMem(img);
+		FreeMem(bin);
+	}
+	return result;
+}
+
+static LRESULT CALLBACK CommonWndProc(HWND wnd, SWndBase* wnd2, SWnd* wnd3, UINT msg, WPARAM w_param, LPARAM l_param)
+{
 	switch (msg)
 	{
 		case WM_CLOSE:
@@ -2451,8 +2780,58 @@ static LRESULT CALLBACK WndProcWndNormal(HWND wnd, UINT msg, WPARAM w_param, LPA
 				wnd3->ModalLock = False;
 			}
 			return 0;
+		case WM_ACTIVATE:
+			if (wnd3->OnActivate != NULL)
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(w_param) != 0)), reinterpret_cast<void*>(static_cast<S64>(HIWORD(w_param) != 0)), wnd3->OnActivate);
+			return 0;
+		case WM_DROPFILES:
+			if (wnd3->OnDropFiles != NULL)
+			{
+				HDROP drop = reinterpret_cast<HDROP>(w_param);
+				UINT num = DragQueryFile(drop, 0xffffffff, NULL, 0);
+				void* buf = AllocMem(0x10 + sizeof(void*) * static_cast<size_t>(num));
+				(static_cast<S64*>(buf))[0] = 1;
+				(static_cast<S64*>(buf))[1] = static_cast<S64>(num);
+				void** ptr = reinterpret_cast<void**>(static_cast<U8*>(buf) + 0x10);
+				for (UINT i = 0; i < num; i++)
+				{
+					UINT len = DragQueryFile(drop, i, NULL, 0);
+					void* buf2 = AllocMem(0x10 + sizeof(Char) * static_cast<size_t>(len + 1));
+					(static_cast<S64*>(buf2))[0] = 1;
+					(static_cast<S64*>(buf2))[1] = static_cast<S64>(len);
+					Char* str = static_cast<Char*>(buf2) + 0x08;
+					DragQueryFile(drop, i, str, len + 1);
+					for (UINT j = 0; j < len; j++)
+						str[j] = str[j] == L'\\' ? L'/' : str[j];
+					ptr[i] = buf2;
+				}
+				DragFinish(drop);
+				Call2Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), buf, wnd3->OnDropFiles);
+			}
+			return 0;
+		case WM_COMMAND:
+		case WM_NOTIFY:
+			CommandAndNotify(wnd, msg, w_param, l_param);
+			return 0;
+	}
+	return DefWindowProc(wnd, msg, w_param, l_param);
+}
+
+static LRESULT CALLBACK WndProcWndNormal(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
+{
+	SWndBase* wnd2 = ToWnd(wnd);
+	SWnd* wnd3 = reinterpret_cast<SWnd*>(wnd2);
+	if (wnd2 == NULL)
+		return DefWindowProc(wnd, msg, w_param, l_param);
+	ASSERT(wnd2->Kind == WndKind_WndNormal);
+	switch (msg)
+	{
 		case WM_SIZE:
 			EnumChildWindows(wnd, ResizeCallback, NULL);
+			if (wnd3->OnResize != NULL)
+			{
+				Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnResize);
+			}
 			return 0;
 		case WM_GETMINMAXINFO:
 			{
@@ -2467,16 +2846,8 @@ static LRESULT CALLBACK WndProcWndNormal(HWND wnd, UINT msg, WPARAM w_param, LPA
 					info->ptMaxTrackSize.y = static_cast<LONG>(wnd3->MaxHeight);
 			}
 			return 0;
-		case WM_ACTIVATE:
-			if (wnd3->OnActivate)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(w_param) != 0)), reinterpret_cast<void*>(static_cast<S64>(HIWORD(w_param) != 0)), wnd3->OnActivate);
-			return 0;
-		case WM_COMMAND:
-		case WM_NOTIFY:
-			CommandAndNotify(wnd, msg, w_param, l_param);
-			return 0;
 	}
-	return DefWindowProc(wnd, msg, w_param, l_param);
+	return CommonWndProc(wnd, wnd2, wnd3, msg, w_param, l_param);
 }
 
 static LRESULT CALLBACK WndProcWndFix(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
@@ -2485,40 +2856,8 @@ static LRESULT CALLBACK WndProcWndFix(HWND wnd, UINT msg, WPARAM w_param, LPARAM
 	SWnd* wnd3 = reinterpret_cast<SWnd*>(wnd2);
 	if (wnd2 == NULL)
 		return DefWindowProc(wnd, msg, w_param, l_param);
-	ASSERT(wnd2->Kind == WndKind_WndFix || wnd2->Kind == WndKind_WndPopup);
-	switch (msg)
-	{
-		case WM_CLOSE:
-			if (wnd3->OnClose != NULL)
-			{
-				if (!static_cast<Bool>(reinterpret_cast<U64>(Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnClose))))
-					return 0;
-			}
-			DestroyWindow(wnd);
-			return 0;
-		case WM_DESTROY:
-			WndCnt--;
-			if (wnd3->ModalLock)
-			{
-				HWND parent = GetWindow(wnd2->WndHandle, GW_OWNER);
-				if (parent != NULL)
-				{
-					EnableWindow(parent, TRUE);
-					SetActiveWindow(parent);
-				}
-				wnd3->ModalLock = False;
-			}
-			return 0;
-		case WM_ACTIVATE:
-			if (wnd3->OnActivate)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(w_param) != 0)), reinterpret_cast<void*>(static_cast<S64>(HIWORD(w_param) != 0)), wnd3->OnActivate);
-			return 0;
-		case WM_COMMAND:
-		case WM_NOTIFY:
-			CommandAndNotify(wnd, msg, w_param, l_param);
-			return 0;
-	}
-	return DefWindowProc(wnd, msg, w_param, l_param);
+	ASSERT(wnd2->Kind == WndKind_WndFix || wnd2->Kind == WndKind_WndPopup || wnd2->Kind == WndKind_WndDialog);
+	return CommonWndProc(wnd, wnd2, wnd3, msg, w_param, l_param);
 }
 
 static LRESULT CALLBACK WndProcWndAspect(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
@@ -2530,29 +2869,12 @@ static LRESULT CALLBACK WndProcWndAspect(HWND wnd, UINT msg, WPARAM w_param, LPA
 	ASSERT(wnd2->Kind == WndKind_WndAspect);
 	switch (msg)
 	{
-		case WM_CLOSE:
-			if (wnd3->OnClose != NULL)
-			{
-				if (!static_cast<Bool>(reinterpret_cast<U64>(Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnClose))))
-					return 0;
-			}
-			DestroyWindow(wnd);
-			return 0;
-		case WM_DESTROY:
-			WndCnt--;
-			if (wnd3->ModalLock)
-			{
-				HWND parent = GetWindow(wnd2->WndHandle, GW_OWNER);
-				if (parent != NULL)
-				{
-					EnableWindow(parent, TRUE);
-					SetActiveWindow(parent);
-				}
-				wnd3->ModalLock = False;
-			}
-			return 0;
 		case WM_SIZE:
 			EnumChildWindows(wnd, ResizeCallback, NULL);
+			if (wnd3->OnResize != NULL)
+			{
+				Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnResize);
+			}
 			return 0;
 		case WM_GETMINMAXINFO:
 			{
@@ -2566,14 +2888,6 @@ static LRESULT CALLBACK WndProcWndAspect(HWND wnd, UINT msg, WPARAM w_param, LPA
 				if (wnd3->MaxHeight != -1)
 					info->ptMaxTrackSize.y = static_cast<LONG>(wnd3->MaxHeight);
 			}
-			return 0;
-		case WM_ACTIVATE:
-			if (wnd3->OnActivate)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(w_param) != 0)), reinterpret_cast<void*>(static_cast<S64>(HIWORD(w_param) != 0)), wnd3->OnActivate);
-			return 0;
-		case WM_COMMAND:
-		case WM_NOTIFY:
-			CommandAndNotify(wnd, msg, w_param, l_param);
 			return 0;
 		case WM_SIZING:
 			{
@@ -2620,7 +2934,7 @@ static LRESULT CALLBACK WndProcWndAspect(HWND wnd, UINT msg, WPARAM w_param, LPA
 			}
 			break;
 	}
-	return DefWindowProc(wnd, msg, w_param, l_param);
+	return CommonWndProc(wnd, wnd2, wnd3, msg, w_param, l_param);
 }
 
 static LRESULT CALLBACK WndProcDraw(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
@@ -2645,52 +2959,53 @@ static LRESULT CALLBACK WndProcDraw(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 				}
 				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(rect.right - rect.left)), reinterpret_cast<void*>(static_cast<S64>(rect.bottom - rect.top)), wnd3->OnPaint);
 				EndPaint(wnd, &ps);
-				return 0;
 			}
-			break;
+			else
+				ValidateRect(wnd, NULL);
+			return 0;
 		case WM_LBUTTONDOWN:
 			SetFocus(wnd);
 			if (wnd3->OnMouseDownL != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseDownL);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseDownL);
 			return 0;
 		case WM_LBUTTONDBLCLK:
 			SetFocus(wnd);
 			if (wnd3->OnMouseDownL != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseDownL);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseDownL);
 			if (wnd3->OnMouseDoubleClick != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseDoubleClick);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseDoubleClick);
 			return 0;
 		case WM_LBUTTONUP:
 			if (wnd3->OnMouseUpL != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseUpL);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseUpL);
 			return 0;
 		case WM_RBUTTONDOWN:
 		case WM_RBUTTONDBLCLK:
 			if (wnd3->OnMouseDownR != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseDownR);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseDownR);
 			return 0;
 		case WM_RBUTTONUP:
 			if (wnd3->OnMouseUpR != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseUpR);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseUpR);
 			return 0;
 		case WM_MBUTTONDOWN:
 		case WM_MBUTTONDBLCLK:
 			if (wnd3->OnMouseDownM != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseDownM);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseDownM);
 			return 0;
 		case WM_MBUTTONUP:
 			if (wnd3->OnMouseUpM != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseUpM);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseUpM);
 			return 0;
 		case WM_MOUSEMOVE:
 			if (!wnd3->Enter)
 			{
 				wnd3->Enter = True;
 				if (wnd3->OnMouseEnter != NULL)
-					Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseEnter);
+					Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseEnter);
 			}
 			if (wnd3->OnMouseMove != NULL)
-				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(LOWORD(l_param))), reinterpret_cast<void*>(static_cast<S64>(HIWORD(l_param))), wnd3->OnMouseMove);
+				Call3Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(LOWORD(l_param)))), reinterpret_cast<void*>(static_cast<S64>(static_cast<S16>(HIWORD(l_param)))), wnd3->OnMouseMove);
 			{
 				TRACKMOUSEEVENT track_mouse_event;
 				track_mouse_event.cbSize = sizeof(track_mouse_event);
@@ -2774,14 +3089,13 @@ static LRESULT CALLBACK WndProcDraw(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 				Call2Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), reinterpret_cast<void*>(static_cast<U64>(w_param)), wnd3->OnKeyChar);
 			return 0;
 		case WM_SIZE:
+			if (wnd3->EqualMagnification)
 			{
-				int width = static_cast<int>(LOWORD(l_param));
-				int height = static_cast<int>(HIWORD(l_param));
+				int width = static_cast<int>(static_cast<S16>(LOWORD(l_param)));
+				int height = static_cast<int>(static_cast<S16>(HIWORD(l_param)));
 				if (width > 0 && height > 0)
 				{
-					int screen_width = wnd3->EqualMagnification ? width : wnd2->DefaultWidth;
-					int screen_height = wnd3->EqualMagnification ? height : wnd2->DefaultHeight;
-					wnd3->DrawBuf = Draw::MakeDrawBuf(width, height, screen_width, screen_height, wnd2->WndHandle, wnd3->DrawBuf);
+					wnd3->DrawBuf = Draw::MakeDrawBuf(width, height, 1, wnd2->WndHandle, wnd3->DrawBuf, wnd3->Editable);
 					wnd3->DrawTwice = True;
 				}
 			}
@@ -2842,7 +3156,7 @@ static LRESULT CALLBACK WndProcDraw(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 			{
 				S64 img = (S64)Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnSetMouseImg);
 				SetCursor(LoadCursor(NULL, MAKEINTRESOURCE(img)));
-				return 0;
+				return 1;
 			}
 			break;
 	}
@@ -2923,17 +3237,6 @@ static LRESULT CALLBACK WndProcCombo(HWND wnd, UINT msg, WPARAM w_param, LPARAM 
 {
 	SWndBase* wnd2 = ToWnd(wnd);
 	ASSERT(wnd2->Kind == WndKind_Combo);
-	switch (msg)
-	{
-		// TODO:
-	}
-	return CallWindowProc(wnd2->DefaultWndProc, wnd, msg, w_param, l_param);
-}
-
-static LRESULT CALLBACK WndProcComboList(HWND wnd, UINT msg, WPARAM w_param, LPARAM l_param)
-{
-	SWndBase* wnd2 = ToWnd(wnd);
-	ASSERT(wnd2->Kind == WndKind_ComboList);
 	switch (msg)
 	{
 		// TODO:
@@ -3054,6 +3357,87 @@ static LRESULT CALLBACK WndProcListView(HWND wnd, UINT msg, WPARAM w_param, LPAR
 			if (wnd3->OnMouseDoubleClick != NULL)
 				Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd2)), wnd3->OnMouseDoubleClick);
 			return 0;
+		case WM_MOUSEMOVE:
+			if (wnd3->Dragging && GetCapture() == wnd)
+			{
+				POINT pt = { LOWORD(l_param), HIWORD(l_param) };
+				ClientToScreen(wnd, &pt);
+				RECT wnd_rect;
+				GetWindowRect(wnd, &wnd_rect);
+				ImageList_DragMove(pt.x - wnd_rect.left, pt.y - wnd_rect.top);
+				return 0;
+			}
+			break;
+		case WM_LBUTTONUP:
+			if (wnd3->Dragging && GetCapture() == wnd)
+			{
+				ImageList_DragLeave(wnd);
+				ImageList_EndDrag();
+				ImageList_Destroy(wnd3->DraggingImage);
+				wnd3->DraggingImage = NULL;
+				ReleaseCapture();
+				wnd3->Dragging = False;
+
+				LV_HITTESTINFO info;
+				info.pt.x = LOWORD(l_param);
+				info.pt.y = HIWORD(l_param);
+				ListView_HitTest(wnd, &info);
+				Bool invalid = False;
+				if (info.iItem == -1)
+					info.iItem = ListView_GetItemCount(wnd);
+				else
+				{
+					LV_ITEM item;
+					item.iItem = info.iItem;
+					item.iSubItem = 0;
+					item.mask = LVIF_STATE;
+					item.stateMask = LVIS_SELECTED;
+					ListView_GetItem(wnd, &item);
+					if ((item.state & LVIS_SELECTED) != 0)
+						invalid = True;
+				}
+				if (!invalid)
+				{
+					int column_len = Header_GetItemCount(ListView_GetHeader(wnd));
+					int id = ListView_GetNextItem(wnd, -1, LVNI_SELECTED);
+					LV_ITEM item;
+					Char buf[1025];
+					item.cchTextMax = 1025;
+					item.pszText = buf;
+					item.mask = LVIF_STATE | LVIF_IMAGE | LVIF_TEXT;
+					item.stateMask = ~static_cast<UINT>(LVIS_SELECTED);
+					SendMessage(wnd, WM_SETREDRAW, FALSE, 0);
+					while (id != -1)
+					{
+						item.iItem = id;
+						item.iSubItem = 0;
+						ListView_GetItem(wnd, &item);
+						item.iItem = info.iItem;
+						int new_id = ListView_InsertItem(wnd, &item);
+						if (info.iItem < id)
+							info.iItem++;
+						if (new_id <= id)
+							id++;
+						for (int i = 1; i < column_len; i++)
+						{
+							item.iItem = id;
+							item.iSubItem = i;
+							ListView_GetItem(wnd, &item);
+							item.iItem = new_id;
+							ListView_SetItem(wnd, &item);
+						}
+						UINT chk = ListView_GetCheckState(wnd, id);
+						ListView_SetCheckState(wnd, new_id, chk);
+						ListView_DeleteItem(wnd, id);
+						id = ListView_GetNextItem(wnd, -1, LVNI_SELECTED);
+					}
+					SendMessage(wnd, WM_SETREDRAW, TRUE, 0);
+					if (wnd3->OnMoveNode)
+						Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd3)), wnd3->OnMoveNode);
+				}
+				return 0;
+			}
+			break;
 	}
 	return CallWindowProc(wnd2->DefaultWndProc, wnd, msg, w_param, l_param);
 }
@@ -3087,11 +3471,10 @@ static LRESULT CALLBACK WndProcTree(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 {
 	SWndBase* wnd2 = ToWnd(wnd);
 	STree* wnd3 = reinterpret_cast<STree*>(wnd2);
-	ASSERT(wnd2->Kind == WndKind_Tree || wnd2->Kind == WndKind_TreeMulti);
 	switch (msg)
 	{
 		case WM_MOUSEMOVE:
-			if (reinterpret_cast<STreeBase*>(wnd3)->DraggingItem != NULL)
+			if (wnd3->DraggingItem != NULL)
 			{
 				POINT point;
 				TVHITTESTINFO hit_test = { 0 };
@@ -3113,7 +3496,7 @@ static LRESULT CALLBACK WndProcTree(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 			}
 			return 0;
 		case WM_LBUTTONUP:
-			if (reinterpret_cast<STreeBase*>(wnd3)->DraggingItem != NULL)
+			if (wnd3->DraggingItem != NULL)
 			{
 				POINT point;
 				TVHITTESTINFO hit_test = { 0 };
@@ -3124,7 +3507,7 @@ static LRESULT CALLBACK WndProcTree(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 				hit_test.pt.y = point.y;
 				ScreenToClient(wnd, &hit_test.pt);
 				HTREEITEM item = reinterpret_cast<HTREEITEM>(SendMessage(wnd, TVM_HITTEST, 0, reinterpret_cast<LPARAM>(&hit_test)));
-				if (reinterpret_cast<STreeBase*>(wnd3)->DraggingItem != item && (reinterpret_cast<STreeBase*>(wnd3)->AllowDraggingToRoot || item != NULL))
+				if (wnd3->DraggingItem != item && (wnd3->AllowDraggingToRoot || item != NULL))
 				{
 					Bool success = True;
 					{
@@ -3132,7 +3515,7 @@ static LRESULT CALLBACK WndProcTree(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 						HTREEITEM item2 = item;
 						while (item2 != NULL)
 						{
-							if (item2 == reinterpret_cast<STreeBase*>(wnd3)->DraggingItem)
+							if (item2 == wnd3->DraggingItem)
 							{
 								success = False;
 								break;
@@ -3143,16 +3526,16 @@ static LRESULT CALLBACK WndProcTree(HWND wnd, UINT msg, WPARAM w_param, LPARAM l
 					if (success)
 					{
 						Char buf[1025];
-						CopyTreeNodeRecursion(wnd, item, reinterpret_cast<STreeBase*>(wnd3)->DraggingItem, buf);
-						TreeView_DeleteItem(wnd, reinterpret_cast<STreeBase*>(wnd3)->DraggingItem);
-						if (reinterpret_cast<STreeBase*>(wnd3)->OnMoveNode)
-							Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd3)), reinterpret_cast<STreeBase*>(wnd3)->OnMoveNode);
+						CopyTreeNodeRecursion(wnd, item, wnd3->DraggingItem, buf);
+						TreeView_DeleteItem(wnd, wnd3->DraggingItem);
+						if (wnd3->OnMoveNode)
+							Call1Asm(IncWndRef(reinterpret_cast<SClass*>(wnd3)), wnd3->OnMoveNode);
 					}
 				}
 				ImageList_DragShowNolock(TRUE);
 				ImageList_DragLeave(NULL);
 				ImageList_EndDrag();
-				reinterpret_cast<STreeBase*>(wnd3)->DraggingItem = NULL;
+				wnd3->DraggingItem = NULL;
 			}
 			return 0;
 	}
@@ -3187,7 +3570,9 @@ static LRESULT CALLBACK WndProcScrollX(HWND wnd, UINT msg, WPARAM w_param, LPARA
 	ASSERT(wnd2->Kind == WndKind_ScrollX);
 	switch (msg)
 	{
-		// TODO:
+		case WM_SETCURSOR:
+			SetCursor(LoadCursor(NULL, IDC_ARROW));
+			return 1;
 	}
 	return CallWindowProc(wnd2->DefaultWndProc, wnd, msg, w_param, l_param);
 }
@@ -3198,7 +3583,9 @@ static LRESULT CALLBACK WndProcScrollY(HWND wnd, UINT msg, WPARAM w_param, LPARA
 	ASSERT(wnd2->Kind == WndKind_ScrollY);
 	switch (msg)
 	{
-		// TODO:
+		case WM_SETCURSOR:
+			SetCursor(LoadCursor(NULL, IDC_ARROW));
+			return 1;
 	}
 	return CallWindowProc(wnd2->DefaultWndProc, wnd, msg, w_param, l_param);
 }

@@ -28,6 +28,9 @@ end func
 +func [d0003.knd, _factInt] factInt(n: int): int
 end func
 
++func [d0003.knd, _fibonacci] fibonacci(n: int): int
+end func
+
 +func [d0003.knd, _knapsack] knapsack(weights: []int, values: []int, maxWeight: int, reuse: bool): int
 end func
 
@@ -42,18 +45,6 @@ end func
 
 +class Mat()
 	*func [d0003.knd, _matDtor, _force] _dtor()
-	end func
-
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
 	end func
 
 	var row: int

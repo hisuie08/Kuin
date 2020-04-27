@@ -7,7 +7,7 @@ var inputBoxValidate: func<([]char):bool>
 var inputBoxResult: []char
 
 +func inputBox(parent: wnd@Wnd, text: []char, title: []char, defaultValue: []char, validate: func<([]char):bool>): []char
-	do @inputBoxWndMain :: wnd@makeWnd(parent, (%fix $ wnd@WndStyle).or(%noMinimize), 353, 120, title)
+	do @inputBoxWndMain :: wnd@makeWnd(parent, (%dialog $ wnd@WndStyle).or(%noMinimize), 353, 120, title)
 	var screenWidth: int
 	var screenHeight: int
 	do wnd@screenSize(&screenWidth, &screenHeight)
@@ -21,12 +21,19 @@ var inputBoxResult: []char
 	do @inputBoxBtnCancel :: wnd@makeBtn(@inputBoxWndMain, 281, 41, 60, 23, %fix, %fix, "Cancel")
 	do @inputBoxBtnCancel.onPush :: btnCancelOnPush
 	do @inputBoxEditInput :: wnd@makeEdit(@inputBoxWndMain, 12, 89, 329, 19, %fix, %fix)
+	do @inputBoxEditInput.focus()
 	if(defaultValue <>& null)
 		do @inputBoxEditInput.setText(defaultValue)
 	end if
+	do @inputBoxEditInput.setSel(0, -1)
 	do @inputBoxValidate :: validate
 	do @inputBoxResult :: null
+
+	var oldOnKeyPress: func<(wnd@Key, wnd@ShiftCtrl): bool> :: wnd@getOnKeyPress()
+	do wnd@setOnKeyPress(onKeyPress)
 	do @inputBoxWndMain.modal()
+	do wnd@setOnKeyPress(oldOnKeyPress)
+
 	var result: []char :: @inputBoxResult
 	do @inputBoxWndMain :: null
 	do @inputBoxLabelText :: null
@@ -36,6 +43,17 @@ var inputBoxResult: []char
 	do @inputBoxValidate :: null
 	do @inputBoxResult :: null
 	ret result
+
+	func onKeyPress(key: wnd@Key, shiftCtrl: wnd@ShiftCtrl): bool
+		if(shiftCtrl = %none)
+			switch(key)
+			case %enter
+				do btnOkOnPush(null)
+			case %esc
+				do btnCancelOnPush(null)
+			end switch
+		end if
+	end func
 
 	func btnOkOnPush(wnd: wnd@Btn)
 		var text: []char :: @inputBoxEditInput.getText()
@@ -90,7 +108,7 @@ end func
 		case "list"
 			do result :: wnd@makeList(parent, x, y, width, height, anchorX, anchorY)
 		case "list_view"
-			do result :: wnd@makeListView(parent, x, y, width, height, anchorX, anchorY)
+			do result :: wnd@makeListView(parent, x, y, width, height, anchorX, anchorY, false, null, null)
 		case "draw"
 			do result :: wnd@makeDraw(parent, x, y, width, height, anchorX, anchorY, parseBool(node, "equal_magnification"))
 		case "radio"
@@ -137,7 +155,9 @@ end func
 				ret 0
 			end if
 			var result: int
-			if(attr.toInt(&result))
+			var existed: bool
+			do result :: attr.toInt(&existed)
+			if(existed)
 				ret result
 			else
 				ret 0

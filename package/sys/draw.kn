@@ -10,10 +10,10 @@ end func
 +func [d0001.knd, _cnt] cnt(): int
 end func
 
-+func [d0001.knd, _viewport] viewport(x: float, y: float, w: float, h: float)
++func [d0001.knd, _screenWidth] screenWidth(): int
 end func
 
-+func [d0001.knd, _resetViewport] resetViewport()
++func [d0001.knd, _screenHeight] screenHeight(): int
 end func
 
 +func [d0001.knd, _depth] depth(test: bool, write: bool)
@@ -25,6 +25,7 @@ end func
 	add
 	sub
 	mul
+	exclusion
 end enum
 
 +func [d0001.knd, _blend] blend(kind: @Blend)
@@ -41,19 +42,40 @@ end func
 +func [d0001.knd, _clearColor] clearColor(color: int)
 end func
 
++func [d0001.knd, _autoClear] autoClear(enabled: bool)
+end func
+
++func [d0001.knd, _clear] clear()
+end func
+
++func [d0001.knd, _editPixels] editPixels(callback: func<(int, int, []bit32)>)
+end func
+
++func [d0001.knd, _capture] capture(path: []char): bool
+end func
+
 +func [d0001.knd, _tri] tri(x1: float, y1: float, x2: float, y2: float, x3: float, y3: float, color: int)
 end func
 
 +func [d0001.knd, _line] line(x1: float, y1: float, x2: float, y2: float, color: int)
 end func
 
-+func [d0001.knd, _rect] rect(x: float, y: float, w: float, h: float, color: int)
++func [d0001.knd, _rect] rect(x: float, y: float, width: float, height: float, color: int)
 end func
 
-+func [d0001.knd, _rectLine] rectLine(x: float, y: float, w: float, h: float, color: int)
++func [d0001.knd, _rectLine] rectLine(x: float, y: float, width: float, height: float, color: int)
 end func
 
 +func [d0001.knd, _circle, _1] circle(x: float, y: float, radiusX: float, radiusY: float, color: int)
+end func
+
++func [d0001.knd, _circleLine, _1] circleLine(x: float, y: float, radiusX: float, radiusY: float, color: int)
+end func
+
++func [d0001.knd, _poly, _4] poly(x: []float, y: []float, color: []int)
+end func
+
++func [d0001.knd, _polyLine, _4] polyLine(x: []float, y: []float, color: []int)
 end func
 
 +func [d0001.knd, _filterNone] filterNone()
@@ -66,16 +88,16 @@ end func
 	*func [d0001.knd, _texDtor, _force] _dtor()
 	end func
 
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
+	+func [d0001.knd, _texWidth] width(): int
 	end func
 
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
+	+func [d0001.knd, _texHeight] height(): int
 	end func
 
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
+	+func [d0001.knd, _texImgWidth] imgWidth(): int
+	end func
+
+	+func [d0001.knd, _texImgHeight] imgHeight(): int
 	end func
 
 	+func [d0001.knd, _texDraw] draw(dstX: float, dstY: float, srcX: float, srcY: float, srcW: float, srcH: float, color: int)
@@ -88,6 +110,7 @@ end func
 	end func
 
 	var size: int
+	var imgSize: int
 	var tex: int
 	var view: int
 end class
@@ -104,23 +127,26 @@ end func
 +func [d0001.knd, _makeTexEvenColor, _make_instance] makeTexEvenColor(me2: @Tex, color: int): @Tex
 end func
 
++enum AlignHorizontal
+	left
+	center
+	right
+end enum
+
++enum AlignVertical
+	top
+	center
+	bottom
+end enum
+
 +class Font()
 	*func [d0001.knd, _fontDtor, _force] _dtor()
 	end func
 
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
-	end func
-
 	+func [d0001.knd, _fontDraw] draw(dstX: float, dstY: float, text: []char, color: int)
+	end func
+
+	+func [d0001.knd, _fontDrawScale] drawScale(dstX: float, dstY: float, dstScaleX: float, dstScaleY: float, text: []char, color: int)
 	end func
 
 	+func [d0001.knd, _fontMaxWidth] maxWidth(): float
@@ -132,11 +158,24 @@ end func
 	+func [d0001.knd, _fontCalcWidth] calcWidth(text: []char): float
 	end func
 
+	+func [d0001.knd, _fontCalcSize] calcSize(width: &float, height: &float, text: []char)
+	end func
+
+	+func [d0001.knd, _fontSetHeight] setHeight(height: float)
+	end func
+
+	+func [d0001.knd, _fontGetHeight] getHeight(): float
+	end func
+
+	+func [d0001.knd, _fontAlign] align(horizontal: @AlignHorizontal, vertical: @AlignVertical)
+	end func
+
 	var tex: int
 	var view: int
 	var cellSize: int
 	var cellSizeAligned: int
-	var advance: int
+	var advance: float
+	var height: float
 	var proportional: int
 	var font: int
 	var charMap: int
@@ -160,25 +199,22 @@ end func
 	*func [d0001.knd, _objDtor, _force] _dtor()
 	end func
 
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
+	+func [d0001.knd, _objDraw, _5] draw(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex)
 	end func
 
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
+	+func [d0001.knd, _objDrawToon, _5] drawToon(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex)
 	end func
 
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
+	+func [d0001.knd, _objDrawFlat, _5] drawFlat(element: int, frame: float, diffuse: @Tex)
 	end func
 
-	+func [d0001.knd, _objDraw] draw(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex)
+	+func [d0001.knd, _objDrawOutline, _6] drawOutline(element: int, frame: float, width: float, color: int)
 	end func
 
-	+func [d0001.knd, _objDrawToon] drawToon(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex)
+	+func [d0001.knd, _objDrawWithShadow, _5] drawWithShadow(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex, shadow: @Shadow)
 	end func
 
-	+func [d0001.knd, _objDrawOutline] drawOutline(element: int, frame: float, width: float, color: int)
+	+func [d0001.knd, _objDrawToonWithShadow, _5] drawToonWithShadow(element: int, frame: float, diffuse: @Tex, specular: @Tex, normal: @Tex, shadow: @Shadow)
 	end func
 
 	+func [d0001.knd, _objMat] mat(mat_: []float, normMat: []float)
@@ -217,6 +253,15 @@ end class
 +func [d0001.knd, _makeObj, _make_instance] makeObj(me2: @Obj, path: []char): @Obj
 end func
 
++func [d0001.knd, _makeBox, _make_instance] makeBox(me2: @Obj): @Obj
+end func
+
++func [d0001.knd, _makeSphere, _make_instance] makeSphere(me2: @Obj): @Obj
+end func
+
++func [d0001.knd, _makePlane, _make_instance] makePlane(me2: @Obj): @Obj
+end func
+
 +func [d0001.knd, _ambLight] ambLight(topR: float, topG: float, topB: float, bottomR: float, bottomG: float, bottomB: float)
 end func
 
@@ -226,5 +271,59 @@ end func
 +func [d0001.knd, _argbToColor] argbToColor(a: float, r: float, g: float, b: float): int
 end func
 
-+func [d0001.knd, _colorToArgb] colorToArgb(color: int, a: &float, r: &float, g: &float, b: &float)
++func [d0001.knd, _colorToArgb] colorToArgb(a: &float, r: &float, g: &float, b: &float, color: int)
+end func
+
++class Particle()
+	*func [d0001.knd, _particleDtor, _force] _dtor()
+	end func
+
+	+func [d0001.knd, _particleDraw] draw(tex: @Tex)
+	end func
+
+	+func [d0001.knd, _particleDraw2d] draw2d(tex: @Tex)
+	end func
+
+	+func [d0001.knd, _particleEmit] emit(x: float, y: float, z: float, veloX: float, veloY: float, veloZ: float, size: float, sizeVelo: float, rot: float, rotVelo: float)
+	end func
+
+	var lifespan: int
+	var buf1: int
+	var buf2: int
+	var buf3: int
+	var buf4: int
+	var buf5: int
+	var buf6: int
+	var buf7: int
+	var buf8: int
+	var particlePtr: int
+	var texSet: int
+	var texTmp: int
+	var draw1To2: int
+end class
+
++func [d0001.knd, _makeParticle, _make_instance, _3] makeParticle(me2: @Particle, lifeSpan: int, color1: int, color2: int, friction: float, accelX: float, accelY: float, accelZ: float, sizeAccel: float, rotAccel: float): @Particle
+end func
+
++class Shadow()
+	*func [d0001.knd, _shadowDtor, _force] _dtor()
+	end func
+
+	+func [d0001.knd, _shadowBeginRecord] beginRecord(x: float, y: float, z: float, radius: float)
+	end func
+
+	+func [d0001.knd, _shadowEndRecord] endRecord()
+	end func
+
+	+func [d0001.knd, _shadowAdd] add(obj: @Obj, element: int, frame: float)
+	end func
+
+	var depthTex: int
+	var depthView: int
+	var depthResView: int
+	var depthSize: int
+	var shadowProjView: int
+end class
+
++func [d0001.knd, _makeShadow, _make_instance, _5] makeShadow(me2: @Shadow, width: int, height: int): @Shadow
 end func

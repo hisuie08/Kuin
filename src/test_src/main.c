@@ -9,12 +9,14 @@
 #include <io.h>
 #include <conio.h>
 
+// 0 = 'Ja', 1 = 'En'.
 #define LANG (0)
-#define TEST_NUM (22)
+
+#define TEST_NUM (24)
 
 #pragma comment(lib, "compiler.lib")
 
-Bool BuildFile(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
+Bool BuildFile(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, const void* related_files, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
 
 static void Log(const Char* code, const Char* msg, const Char* src, int row, int col);
 static Bool Compare(const Char* path1, const Char* path2);
@@ -42,7 +44,7 @@ int wmain(void)
 			swprintf(output_path, KUIN_MAX_PATH + 1, L"../../test/output/output%04d.exe", i);
 			swprintf(log_path, KUIN_MAX_PATH + 1, L"../../test/output/log%04d.txt", i);
 			wprintf(L"%s\n", output_path);
-			if (!BuildFile(test_path, L"../../package/sys/", output_path, L"../../package/sys/default.ico", False, L"cui", Log, 1, 0, False))
+			if (!BuildFile(test_path, L"../../package/sys/", output_path, L"../../package/sys/default.ico", NULL, False, L"cui", Log, 1, 0, False))
 				goto Failure;
 			wprintf(L"Compile[S]");
 			{
@@ -54,7 +56,7 @@ int wmain(void)
 			}
 			{
 				FILE* file_ptr;
-				DEBUG_EVENT debug_event;
+				DEBUG_EVENT debug_event = { 0 };
 				Bool end = False;
 				file_ptr = _wfopen(log_path, L"w, ccs=UTF-8");
 				if (file_ptr == NULL)
@@ -68,10 +70,12 @@ int wmain(void)
 					switch (debug_event.dwDebugEventCode)
 					{
 						case CREATE_PROCESS_DEBUG_EVENT:
-							CloseHandle(debug_event.u.CreateProcessInfo.hFile);
+							if (debug_event.u.CreateProcessInfo.hFile != 0)
+								CloseHandle(debug_event.u.CreateProcessInfo.hFile);
 							break;
 						case LOAD_DLL_DEBUG_EVENT:
-							CloseHandle(debug_event.u.LoadDll.hFile);
+							if (debug_event.u.LoadDll.hFile != 0)
+								CloseHandle(debug_event.u.LoadDll.hFile);
 							break;
 						case EXIT_PROCESS_DEBUG_EVENT:
 							end = True;
@@ -125,12 +129,12 @@ int wmain(void)
 	}
 	else if (type == -1)
 	{
-		if (!BuildFile(L"../../test/kn/test.kn", L"../../package/sys/", L"../../test/output/output.exe", L"../../package/sys/default.ico", False, L"cui", Log, LANG, 0, False))
+		if (!BuildFile(L"../../test/kn/test.kn", L"../../package/sys/", L"../../test/output/output.exe", L"../../package/sys/default.ico", NULL, False, L"cui", Log, LANG, 0, False))
 			goto Failure;
 	}
 	else if (type == -2)
 	{
-		if (!BuildFile(L"../../test/kn/test.kn", L"../../package/sys/", L"../../test/output/output.exe", L"../../package/sys/default.ico", False, L"wnd", Log, LANG, 0, False))
+		if (!BuildFile(L"../../test/kn/test.kn", L"../../package/sys/", L"../../test/output/output.exe", L"../../package/sys/default.ico", NULL, False, L"wnd", Log, LANG, 0, False))
 			goto Failure;
 	}
 	else

@@ -125,6 +125,7 @@ typedef struct SAstFunc
 	SAst Ast;
 	S64* AddrTop;
 	S64 AddrBottom;
+	S64 PosRowBottom;
 	const Char* DllName;
 	const Char* DllFuncName;
 	EFuncAttr FuncAttr;
@@ -176,6 +177,7 @@ typedef struct SAstClass
 	int VarSize;
 	int FuncSize;
 	SList* Items;
+	Bool IndirectCreation;
 } SAstClass;
 
 typedef struct SAstEnum
@@ -207,6 +209,9 @@ typedef struct SAstArg
 typedef struct SAstStat
 {
 	SAst Ast;
+	SAsm* AsmTop;
+	SAsm* AsmBottom;
+	S64 PosRowBottom;
 } SAstStat;
 
 typedef struct SAstStatBreakable
@@ -516,6 +521,7 @@ typedef struct SAstExprNew
 {
 	SAstExpr AstExpr;
 	SAstType* ItemType;
+	Bool AutoCreated;
 } SAstExprNew;
 
 typedef struct SAstExprNewArray
@@ -559,7 +565,7 @@ typedef struct SAstExprCallArg
 {
 	SAstExpr* Arg;
 	Bool RefVar;
-	SAstArg* SkipVar;
+	Bool SkipVar;
 } SAstExprCallArg;
 
 typedef struct SAstExprCall

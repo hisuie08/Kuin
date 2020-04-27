@@ -12,12 +12,7 @@ end func
 	fix
 	aspect
 	popup
-{
-	mdi
-	mdiChild
-	dock
-	dockChild
-}
+	dialog
 	layered :: 0x10000
 	noMinimize :: 0x20000
 end enum
@@ -30,18 +25,6 @@ end enum
 
 +class WndBase()
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
-	end func
-
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
 	end func
 
 	+func [d0001.knd, _wndBaseGetPos] getPos(x: &int, y: &int, width: &int, height: &int)
@@ -117,6 +100,7 @@ end enum
 	var defaultWndProc: int
 	var ctrlFlag: int
 	var defaultRect: int
+	var redrawEnabled: int
 	+var children: list<kuin@Class>
 end class
 
@@ -160,6 +144,12 @@ end class
 	+func [d0001.knd, _wndGetAlpha] getAlpha(): int
 	end func
 
+	+func [d0001.knd, _wndAcceptDraggedFiles] acceptDraggedFiles(isAccepted: bool)
+	end func
+
+	+func [d0001.knd, _wndUpdateMenu] updateMenu()
+	end func
+
 	+func modal()
 		do me.setModalLock()
 		while(@act() & me.modalLock)
@@ -173,6 +163,8 @@ end class
 	+var onClose: func<(@WndBase): bool>
 	+var onActivate: func<(@WndBase, bool, bool)>
 	+var onPushMenu: func<(@WndBase, int)>
+	+var onDropFiles: func<(@WndBase, [][]char)>
+	+var onResize: func<(@WndBase)>
 	var modalLock: bool
 end class
 
@@ -198,6 +190,9 @@ end enum
 	+func [d0001.knd, _drawMoveCaret] moveCaret(x: int, y: int)
 	end func
 
+	+func [d0001.knd, _drawMouseCapture] mouseCapture(enabled: bool)
+	end func
+
 	var equalMagnification: int
 	var drawBuf: int
 	+var onPaint: func<(@WndBase, int, int)>
@@ -220,6 +215,11 @@ end enum
 	+var onScrollX: func<(@WndBase, int)>
 	+var onScrollY: func<(@WndBase, int)>
 	+var onSetMouseImg: func<(@WndBase): @MouseImg>
+end class
+
++class DrawEditable(@Draw)
+	*func [d0001.knd, _drawDtor, _force] _dtor()
+	end func
 end class
 
 +class Btn(@WndBase)
@@ -290,15 +290,22 @@ end class
 	end func
 
 	+var onChange: func<(@WndBase)>
+	+var onFocus: func<(@WndBase, bool)>
 end class
 
 +class Edit(@EditBase)
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
 	end func
+
+	+func [d0001.knd, _editRightAligned] rightAligned(enabled: bool)
+	end func
 end class
 
 +class EditMulti(@EditBase)
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
+	end func
+
+	+func [d0001.knd, _editMultiAddText] addText(text: []char)
 	end func
 end class
 
@@ -340,10 +347,32 @@ end class
 +class Combo(@WndBase)
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
 	end func
-end class
 
-+class ComboList(@WndBase)
-	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
+	+func [d0001.knd, _comboClear] clear()
+	end func
+
+	+func [d0001.knd, _comboAdd] add(text: []char)
+	end func
+
+	+func [d0001.knd, _comboIns] ins(idx: int, text: []char)
+	end func
+
+	+func [d0001.knd, _comboDel] del(idx: int)
+	end func
+
+	+func [d0001.knd, _comboLen] len(): int
+	end func
+
+	+func [d0001.knd, _comboSetSel] setSel(idx: int)
+	end func
+
+	+func [d0001.knd, _comboGetSel] getSel(): int
+	end func
+
+	+func [d0001.knd, _comboSetText] setText(idx: int, text: []char)
+	end func
+
+	+func [d0001.knd, _comboGetText] getText(idx: int): []char
 	end func
 end class
 
@@ -404,6 +433,15 @@ end class
 	end func
 end class
 
++enum ListViewStyle
+	large
+	report
+	small
+	list_
+	chk
+	hideHeader :: 0x4000
+end enum
+
 +class ListView(@WndBase)
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
 	end func
@@ -411,10 +449,10 @@ end class
 	+func [d0001.knd, _listViewClear] clear()
 	end func
 
-	+func [d0001.knd, _listViewAdd] add(text: []char)
+	+func [d0001.knd, _listViewAdd] add(text: []char, img: int)
 	end func
 
-	+func [d0001.knd, _listViewIns] ins(idx: int, text: []char)
+	+func [d0001.knd, _listViewIns] ins(idx: int, text: []char, img: int)
 	end func
 
 	+func [d0001.knd, _listViewDel] del(idx: int)
@@ -435,13 +473,13 @@ end class
 	+func [d0001.knd, _listViewLenColumn] lenColumn(): int
 	end func
 
-	+func [d0001.knd, _listViewClearColumn] clearColumn()
+	+func [d0001.knd, _listViewClearAll] clearAll()
 	end func
 
-	+func [d0001.knd, _listViewSetText] setText(idx: int, column: int, text: []char)
+	+func [d0001.knd, _listViewSetText] setText(idx: int, column: int, text: []char, img: int)
 	end func
 
-	+func [d0001.knd, _listViewGetText] getText(idx: int, column: int): []char
+	+func [d0001.knd, _listViewGetText] getText(img: &int, idx: int, column: int): []char
 	end func
 
 	+func [d0001.knd, _listViewAdjustWidth] adjustWidth()
@@ -453,9 +491,30 @@ end class
 	+func [d0001.knd, _listViewGetSel] getSel(): int
 	end func
 
+	+func [d0001.knd, _listViewSetSelMulti] setSelMulti(idx: int, value: bool)
+	end func
+
+	+func [d0001.knd, _listViewGetSelMulti] getSelMulti(idx: int): bool
+	end func
+
+	+func [d0001.knd, _listViewStyle] style(listViewStyle: @ListViewStyle)
+	end func
+
+	+func [d0001.knd, _listViewDraggable] draggable(enabled: bool)
+	end func
+
+	+func [d0001.knd, _listViewSetChk] setChk(idx: int, value: bool)
+	end func
+
+	+func [d0001.knd, _listViewGetChk] getChk(idx: int): bool
+	end func
+
 	+var onSel: func<(@WndBase)>
 	+var onMouseDoubleClick: func<(@WndBase)>
 	+var onMouseClick: func<(@WndBase)>
+	+var onMoveNode: func<(@WndBase)>
+	var draggable_: int
+	var draggingImage: int
 end class
 
 +class Pager(@WndBase)
@@ -485,7 +544,7 @@ end class
 	+var onSel: func<(@WndBase)>
 end class
 
-+class TreeBase(@WndBase)
++class Tree(@WndBase)
 	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
 	end func
 
@@ -504,59 +563,21 @@ end class
 	+func [d0001.knd, _treeAllowDraggingToRoot] allowDraggingToRoot(enabled: bool)
 	end func
 
+	+func [d0001.knd, _treeSetSel] setSel(node: @TreeNode)
+	end func
+
+	+func [d0001.knd, _treeGetSel, _make_instance] getSel(me2: @TreeNode): @TreeNode
+	end func
+
 	var draggable_: int
 	var draggingItem: int
 	+var onSel: func<(@WndBase)>
 	+var onMoveNode: func<(@WndBase)>
 end class
 
-+class Tree(@TreeBase)
-	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
-	end func
-
-	+func [d0001.knd, _treeSetSel] setSel(node: @TreeNode)
-	end func
-
-	+func [d0001.knd, _treeGetSel, _make_instance] getSel(me2: @TreeNode): @TreeNode
-	end func
-end class
-
-+class TreeMulti(@TreeBase)
-	*func [d0001.knd, _wndBaseDtor, _force] _dtor()
-	end func
-
-	+func [d0001.knd, _treeMultiSetSel] setSel(nodes: []@TreeNode)
-	end func
-
-	+func getSel(): []@TreeNode
-		var result: list<@TreeNode> :: #list<@TreeNode>
-		var node: @TreeNode :: me.getSelImpl(null)
-		while(node <>& null)
-			do result.add(node)
-			do node :: me.getSelImpl(node)
-		end while
-		ret result.toArray()
-	end func
-
-	func [d0001.knd, _treeMultiGetSel, _make_instance] getSelImpl(me2: @TreeNode, node: @TreeNode): @TreeNode
-	end func
-end class
-
 +class TreeNode()
 	+*func cmp(t: @TreeNode): int
 		ret me.item - t.item
-	end func
-
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
 	end func
 
 	+func [d0001.knd, _treeNodeAddChild, _make_instance] addChild(me2: @TreeNode, name: []char): @TreeNode
@@ -653,7 +674,10 @@ end enum
 	continue
 end enum
 
-+func [d0001.knd, _onKeyPress] onKeyPress(onKeyPressFunc: func<(@Key, @ShiftCtrl): bool>)
++func [d0001.knd, _setOnKeyPress] setOnKeyPress(onKeyPressFunc: func<(@Key, @ShiftCtrl): bool>)
+end func
+
++func [d0001.knd, _getOnKeyPress] getOnKeyPress(): func<(@Key, @ShiftCtrl): bool>
 end func
 
 +func [d0001.knd, _msgBox] msgBox(parent: @Wnd, text: []char, title: []char, icon: @MsgBoxIcon, btn: @MsgBoxBtn): @MsgBoxResult
@@ -663,6 +687,12 @@ end func
 end func
 
 +func [d0001.knd, _saveFileDialog] saveFileDialog(parent: @Wnd, filter: [][]char, defaultFilter: int, defaultExt: []char): []char
+end func
+
++func [d0001.knd, _fileDialogDir] fileDialogDir(defaultDir: []char)
+end func
+
++func [d0001.knd, _colorDialog] colorDialog(parent: @Wnd, defaultColor: int): int
 end func
 
 +func [d0001.knd, _setClipboardStr] setClipboardStr(str: []char)
@@ -684,6 +714,18 @@ end func
 end func
 
 +func [d0001.knd, _makeDraw, _make_instance] makeDraw(me2: @Draw, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor, equalMagnification: bool): @Draw
+	if(parent <>& null)
+		do parent.addChild(me2)
+	end if
+end func
+
++func [d0001.knd, _makeDrawReduced, _make_instance] makeDrawReduced(me2: @Draw, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor, equalMagnification: bool, split: int): @Draw
+	if(parent <>& null)
+		do parent.addChild(me2)
+	end if
+end func
+
++func [d0001.knd, _makeDrawEditable, _make_instance] makeDrawEditable(me2: @DrawEditable, parent: @WndBase, x: int, y: int, width: int, height: int): @DrawEditable
 	if(parent <>& null)
 		do parent.addChild(me2)
 	end if
@@ -726,12 +768,6 @@ end func
 end func
 
 +func [d0001.knd, _makeCombo, _make_instance] makeCombo(me2: @Combo, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor): @Combo
-	if(parent <>& null)
-		do parent.addChild(me2)
-	end if
-end func
-
-+func [d0001.knd, _makeComboList, _make_instance] makeComboList(me2: @ComboList, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor): @ComboList
 	if(parent <>& null)
 		do parent.addChild(me2)
 	end if
@@ -791,7 +827,7 @@ end func
 	end if
 end func
 
-+func [d0001.knd, _makeListView, _make_instance] makeListView(me2: @ListView, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor): @ListView
++func [d0001.knd, _makeListView, _make_instance] makeListView(me2: @ListView, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor, multiSel: bool, smallImgs: [][]char, largeImgs: [][]char): @ListView
 	if(parent <>& null)
 		do parent.addChild(me2)
 	end if
@@ -810,12 +846,6 @@ end func
 end func
 
 +func [d0001.knd, _makeTree, _make_instance] makeTree(me2: @Tree, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor): @Tree
-	if(parent <>& null)
-		do parent.addChild(me2)
-	end if
-end func
-
-+func [d0001.knd, _makeTreeMulti, _make_instance] makeTreeMulti(me2: @TreeMulti, parent: @WndBase, x: int, y: int, width: int, height: int, anchorX: @Anchor, anchorY: @Anchor): @TreeMulti
 	if(parent <>& null)
 		do parent.addChild(me2)
 	end if
@@ -849,18 +879,6 @@ end func
 	*func [d0001.knd, _menuDtor, _force] _dtor()
 	end func
 
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
-	end func
-
 	+func [d0001.knd, _menuAdd] add(id: int, text: []char)
 	end func
 
@@ -869,6 +887,19 @@ end func
 
 	+func [d0001.knd, _menuAddPopup] addPopup(text: []char, popup: @Popup)
 		do me.children.add(popup)
+	end func
+
+	+func [d0001.knd, _menuIns] ins(targetId: int, id: int, text: []char)
+	end func
+
+	+func [d0001.knd, _menuInsPopup] insPopup(target: @Popup, text: []char, popup: @Popup)
+		do me.children.add(popup)
+	end func
+
+	+func [d0001.knd, _menuDel] del(id: int)
+	end func
+
+	+func [d0001.knd, _menuDelPopup] delPopup(popup: @Popup)
 	end func
 
 	var handle: int
@@ -892,16 +923,7 @@ end func
 end func
 
 +class TabOrder()
-	*func [_force] _copy(): kuin@Class
-		throw 0xE9170005
-	end func
-
-	*func [_force] _toBin(): []bit8
-		throw 0xE9170005
-	end func
-
-	*func [_force] _fromBin(bin: []bit8, idx: &int): kuin@Class
-		throw 0xE9170005
+	*func [_force] _dtor()
 	end func
 
 	+func [d0001.knd, _tabOrderChk] chk(key: @Key, shiftCtrl: @ShiftCtrl): bool
@@ -987,6 +1009,10 @@ end func
 	f10
 	f11
 	f12
+	plus :: 0xBB
+	comma
+	minus
+	period
 end enum
 
 +enum MouseImg
@@ -995,8 +1021,8 @@ end enum
 	wait
 	cross
 	upArrow
-	resizeLTRD :: 32642
-	resizeRTLD
+	resizeLTRB :: 32642
+	resizeRTLB
 	resizeH
 	resizeV
 	move

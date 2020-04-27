@@ -55,8 +55,9 @@ EXPORT void _fill(void* me_, const U8* type, const void* value);
 EXPORT void* _min(const void* me_, const U8* type);
 EXPORT void* _max(const void* me_, const U8* type);
 EXPORT void* _repeat(const void* me_, const U8* type, S64 len);
-EXPORT Bool _toInt(const U8* me_, S64* value);
-EXPORT Bool _toFloat(const U8* me_, double* value);
+EXPORT S64 _toInt(const U8* me_, Bool* success);
+EXPORT double _toFloat(const U8* me_, Bool* success);
+EXPORT U64 _toBit64(const U8* me_, Bool* success);
 EXPORT void* _lower(const U8* me_);
 EXPORT void* _upper(const U8* me_);
 EXPORT void* _trim(const U8* me_);
@@ -75,7 +76,7 @@ EXPORT void _addDict(void* me_, const U8* type, const U8* value_type, const void
 EXPORT void* _getList(void* me_, const U8* type);
 EXPORT void* _getStack(void* me_, const U8* type);
 EXPORT void* _getQueue(void* me_, const U8* type);
-EXPORT void* _getDict(void* me_, const U8* type, const void* key);
+EXPORT void* _getDict(void* me_, const U8* type, const void* key, Bool* existed);
 EXPORT void* _getOffset(void* me_, const U8* type, S64 offset);
 EXPORT void _head(void* me_, const U8* type);
 EXPORT void _tail(void* me_, const U8* type);
@@ -93,6 +94,10 @@ EXPORT void* _toArrayValue(void* me_, const U8* type);
 EXPORT void* _peek(void* me_, const U8* type);
 EXPORT Bool _exist(void* me_, const U8* type, const void* key);
 EXPORT Bool _forEach(void* me_, const U8* type, const void* callback, void* data);
+EXPORT void _delDict(void* me_, const U8* type, const void* key);
+EXPORT S64 _idx(void* me_, const U8* type);
+EXPORT SClass* _getPtr(void* me_, const U8* type, SClass* me2);
+EXPORT void _setPtr(void* me_, const U8* type, SClass* ptr);
 
 // Assembly functions.
 void* ToBinClassAsm(const void* me_);

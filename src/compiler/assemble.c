@@ -131,6 +131,7 @@ static int SetTypeIdRecursion(U8* ptr, int idx, const SAstType* type);
 static void SetTypeIdForFromBin(EReg reg, const SAstType* type);
 static void SetTypeIdForFromBinRecursion(int* idx_type, U8* data_type, int* idx_class, S64** data_class, const SAstType* type);
 static void ExpandMe(SAstExprDot* dot, int reg_i);
+static void SetStatAsm(SAstStat* ast, SListNode* asms_top, SListNode* asms_bottom);
 static void AssembleFunc(SAstFunc* ast, Bool entry);
 static void AssembleStats(SList* asts);
 static void AssembleIf(SAstStatIf* ast);
@@ -199,6 +200,7 @@ void Assemble(SPackAsm* pack_asm, const SAstFunc* entry, const SOption* option, 
 		((SAst*)func)->AnalyzedCache = (SAst*)func;
 		((SAstFunc*)func)->AddrTop = NewAddr();
 		((SAstFunc*)func)->AddrBottom = -1;
+		((SAstFunc*)func)->PosRowBottom = -1;
 		((SAstFunc*)func)->DllName = NULL;
 		((SAstFunc*)func)->DllFuncName = NULL;
 		((SAstFunc*)func)->FuncAttr = FuncAttr_None;
@@ -933,6 +935,7 @@ static void GcDec(int reg_i, int reg_f, const SAstType* type)
 	ListAdd(PackAsm->Asms, AsmJE(ValImm(4, RefValueAddr(((SAsm*)lbl1)->Addr, True))));
 	ListAdd(PackAsm->Asms, AsmDEC(ValMemS(8, ValReg(8, RegI[reg_i]), NULL, 0x00)));
 #if defined(_DEBUG)
+	/*
 	{
 		// Since reference counters rarely exceeds 0x10, it is regarded as memory corruption.
 		SAsmLabel* lbl2 = AsmLabel();
@@ -941,6 +944,7 @@ static void GcDec(int reg_i, int reg_f, const SAstType* type)
 		ListAdd(PackAsm->Asms, AsmINT(ValImmU(8, 0x03)));
 		ListAdd(PackAsm->Asms, lbl2);
 	}
+	*/
 #endif
 	ListAdd(PackAsm->Asms, AsmCMP(ValMemS(8, ValReg(8, RegI[reg_i]), NULL, 0x00), ValImmU(8, 0x00)));
 	ListAdd(PackAsm->Asms, AsmJNE(ValImm(4, RefValueAddr(((SAsm*)lbl1)->Addr, True))));
@@ -1036,7 +1040,7 @@ static void ChkOverflow(void)
 	{
 		SAsmLabel* lbl1 = AsmLabel();
 		ListAdd(PackAsm->Asms, AsmJNO(ValImm(4, RefValueAddr(((SAsm*)lbl1)->Addr, True))));
-		RaiseExcpt(0xe9170003);
+		RaiseExcpt(EXCPT_DBG_INT_OVERFLOW);
 		ListAdd(PackAsm->Asms, lbl1);
 	}
 }
@@ -1551,6 +1555,19 @@ static void ExpandMe(SAstExprDot* dot, int reg_i)
 	ListAdd(PackAsm->Asms, AsmADD(ValReg(8, RegI[reg_i]), ValMemS(8, ValReg(8, RegI[reg_i]), NULL, 0x00)));
 }
 
+static void SetStatAsm(SAstStat* ast, SListNode* asms_top, SListNode* asms_bottom)
+{
+	if (asms_top == NULL || asms_top->Next == NULL)
+	{
+		if (PackAsm->Asms->Top != NULL)
+			ast->AsmTop = (SAsm*)PackAsm->Asms->Top->Data;
+	}
+	else
+		ast->AsmTop = (SAsm*)asms_top->Next->Data;
+	if (asms_bottom != NULL)
+		ast->AsmBottom = (SAsm*)asms_bottom->Data;
+}
+
 static void AssembleFunc(SAstFunc* ast, Bool entry)
 {
 	ASSERT(((SAst*)ast)->AnalyzedCache != NULL);
@@ -1602,7 +1619,7 @@ static void AssembleFunc(SAstFunc* ast, Bool entry)
 			}
 		}
 		else
-			ListAdd(PackAsm->Asms, AsmSUB(ValReg(4, Reg_SP), ValImm(4, RefValueAddr(var_size, False))));
+			ListAdd(PackAsm->Asms, AsmSUB(ValReg(8, Reg_SP), ValImm(4, RefValueAddr(var_size, False))));
 		ListAdd(PackAsm->Asms, table->PostPrologue);
 		if (((SAst*)ast)->TypeId != AstTypeId_FuncRaw)
 		{
@@ -1877,6 +1894,7 @@ static void AssembleFunc(SAstFunc* ast, Bool entry)
 					((SAst*)func)->AnalyzedCache = (SAst*)func;
 					((SAstFunc*)func)->AddrTop = NewAddr();
 					((SAstFunc*)func)->AddrBottom = -1;
+					((SAstFunc*)func)->PosRowBottom = -1;
 					((SAstFunc*)func)->DllName = NULL;
 					((SAstFunc*)func)->DllFuncName = NULL;
 					((SAstFunc*)func)->FuncAttr = FuncAttr_None;
@@ -2014,6 +2032,7 @@ static void AssembleStats(SList* asts)
 	while (ptr != NULL)
 	{
 		SAstStat* ast = (SAstStat*)ptr->Data;
+		SListNode* asms_bottom = PackAsm->Asms->Bottom;
 		switch (((SAst*)ast)->TypeId)
 		{
 			case AstTypeId_StatIf: AssembleIf((SAstStatIf*)ast); break;
@@ -2032,6 +2051,8 @@ static void AssembleStats(SList* asts)
 				ASSERT(False);
 				break;
 		}
+		if (((SAst*)ast)->TypeId != AstTypeId_StatBlock)
+			SetStatAsm(ast, asms_bottom, PackAsm->Asms->Bottom);
 		ptr = ptr->Next;
 	}
 }
@@ -2444,6 +2465,7 @@ static void AssembleTry(SAstStatTry* ast)
 			((SAst*)func)->AnalyzedCache = (SAst*)func;
 			((SAstFunc*)func)->AddrTop = NewAddr();
 			((SAstFunc*)func)->AddrBottom = -1;
+			((SAstFunc*)func)->PosRowBottom = -1;
 			((SAstFunc*)func)->DllName = NULL;
 			((SAstFunc*)func)->DllFuncName = NULL;
 			((SAstFunc*)func)->FuncAttr = FuncAttr_None;
@@ -2531,6 +2553,7 @@ static void AssembleTry(SAstStatTry* ast)
 			((SAst*)func)->AnalyzedCache = (SAst*)func;
 			((SAstFunc*)func)->AddrTop = NewAddr();
 			((SAstFunc*)func)->AddrBottom = -1;
+			((SAstFunc*)func)->PosRowBottom = -1;
 			((SAstFunc*)func)->DllName = NULL;
 			((SAstFunc*)func)->DllFuncName = NULL;
 			((SAstFunc*)func)->FuncAttr = FuncAttr_None;
@@ -2565,10 +2588,12 @@ static void AssembleThrow(SAstStatThrow* ast)
 static void AssembleBlock(SAstStatBlock* ast)
 {
 	ASSERT(((SAst*)ast)->AnalyzedCache != NULL);
+	SListNode* asms_bottom = PackAsm->Asms->Bottom;
 	AssembleStats(ast->Stats);
 	SAsmLabel* break_point = ((SAstStatBreakable*)ast)->BreakPoint;
 	if (break_point != NULL)
 		ListAdd(PackAsm->Asms, break_point);
+	SetStatAsm((SAstStat*)ast, asms_bottom, PackAsm->Asms->Bottom);
 }
 
 static void AssembleRet(SAstStatRet* ast)
@@ -2609,7 +2634,7 @@ static void AssembleAssert(SAstStatAssert* ast)
 	ToValue(ast->Cond, 0, 0);
 	ListAdd(PackAsm->Asms, AsmCMP(ValReg(1, RegI[0]), ValImmU(1, 0x00)));
 	ListAdd(PackAsm->Asms, AsmJNE(ValImm(4, RefValueAddr(((SAsm*)lbl1)->Addr, True))));
-	ListAdd(PackAsm->Asms, AsmMOV(ValReg(4, Reg_CX), ValImmU(4, 0xe9170000)));
+	ListAdd(PackAsm->Asms, AsmMOV(ValReg(4, Reg_CX), ValImmU(4, EXCPT_DBG_ASSERT_FAILED)));
 	ListAdd(PackAsm->Asms, AsmXOR(ValReg(4, Reg_DX), ValReg(4, Reg_DX)));
 	ListAdd(PackAsm->Asms, AsmXOR(ValReg(4, Reg_R8), ValReg(4, Reg_R8)));
 	ListAdd(PackAsm->Asms, AsmXOR(ValReg(4, Reg_R9), ValReg(4, Reg_R9)));
@@ -3412,7 +3437,10 @@ static void AssembleExprAs(SAstExprAs* ast, int reg_i, int reg_f)
 					SAsmLabel* lbl1 = AsmLabel();
 					SAsmLabel* lbl2 = AsmLabel();
 					SAsmLabel* lbl3 = AsmLabel();
+					SAsmLabel* lbl4 = AsmLabel();
 					ASSERT(IsClass(t1));
+					ListAdd(PackAsm->Asms, AsmCMP(ValReg(8, RegI[reg_i]), ValImmU(8, 0x00)));
+					ListAdd(PackAsm->Asms, AsmJE(ValImm(4, RefValueAddr(((SAsm*)lbl4)->Addr, True))));
 					ListAdd(PackAsm->Asms, AsmMOV(ValReg(8, Reg_SI), ValReg(8, RegI[reg_i])));
 					ListAdd(PackAsm->Asms, AsmMOV(ValReg(8, RegI[reg_i]), ValMemS(8, ValReg(8, RegI[reg_i]), NULL, 0x08)));
 					ListAdd(PackAsm->Asms, lbl1);
@@ -3428,9 +3456,10 @@ static void AssembleExprAs(SAstExprAs* ast, int reg_i, int reg_f)
 					ListAdd(PackAsm->Asms, AsmADD(ValReg(8, RegI[reg_i]), ValReg(8, Reg_DI)));
 					ListAdd(PackAsm->Asms, AsmJMP(ValImm(4, RefValueAddr(((SAsm*)lbl1)->Addr, True))));
 					ListAdd(PackAsm->Asms, lbl2);
-					RaiseExcpt(0xe9170001);
+					RaiseExcpt(EXCPT_CLASS_CAST_FAILED);
 					ListAdd(PackAsm->Asms, lbl3);
 					ListAdd(PackAsm->Asms, AsmMOV(ValReg(8, RegI[reg_i]), ValReg(8, Reg_SI)));
+					ListAdd(PackAsm->Asms, lbl4);
 				}
 			}
 			break;
@@ -3566,7 +3595,7 @@ static void AssembleExprCall(SAstExprCall* ast, int reg_i, int reg_f)
 					{
 						ToRef(arg->Arg, RegI[0], RegI[0]);
 						tmp_args[idx] = MakeTmpVar(8, NULL);
-						if (arg->SkipVar != NULL)
+						if (arg->SkipVar)
 						{
 							int size = GetSize(arg->Arg->Type);
 							ListAdd(PackAsm->Asms, AsmMOV(ValMemS(size, ValReg(8, RegI[0]), NULL, 0x00), ValImmU(size, 0x00)));
@@ -3703,7 +3732,7 @@ static void AssembleExprArray(SAstExprArray* ast, int reg_i, int reg_f)
 #if defined(_DEBUG)
 		ListAdd(PackAsm->Asms, AsmINT(ValImmU(8, 0x03)));
 #endif
-		RaiseExcpt(0xe9170002);
+		RaiseExcpt(EXCPT_DBG_ARRAY_IDX_OUT_OF_RANGE);
 		ListAdd(PackAsm->Asms, lbl2);
 	}
 	ASSERT(((SAst*)ast->Var->Type)->TypeId == AstTypeId_TypeArray);
@@ -3870,6 +3899,7 @@ static void AssembleExprRef(SAstExpr* ast, int reg_i, int reg_f)
 					ASSERT(ast2->Name != NULL && wcscmp(ast2->Name, L"$") != 0);
 					{
 						S64* addr = AddWritableData(NewStr(NULL, L"%s@%s", ast2->Pos->SrcName, ast2->Name), size);
+						((SAstArg*)ast2)->Addr = addr;
 						ListAdd(PackAsm->Asms, AsmLEA(ValReg(8, RegI[reg_i]), ValRIP(8, RefValueAddr(addr, True))));
 					}
 					break;

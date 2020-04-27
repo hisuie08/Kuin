@@ -8,9 +8,10 @@
 #include <fcntl.h>
 #include <io.h>
 
+// 0 = 'Ja', 1 = 'En'.
 #define LANG (0)
 
-typedef Bool(*TypeOfBuild)(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
+typedef Bool(*TypeOfBuild)(const Char* path, const Char* sys_dir, const Char* output, const Char* icon, const void* related_files, Bool rls, const Char* env, void(*func_log)(const Char* code, const Char* msg, const Char* src, int row, int col), S64 lang, S64 app_code, Bool not_deploy);
 typedef void(*TypeOfVersion)(int* major, int* minor, int* micro);
 typedef void(*TypeOfInitCompiler)(S64 mem_num, S64 lang);
 typedef void(*TypeOfFinCompiler)(void);
@@ -27,6 +28,7 @@ int wmain(int argc, Char** argv)
 	const Char* output = NULL;
 	const Char* sys_dir = NULL;
 	const Char* icon = NULL;
+	const void* related_files = NULL; // TODO: How to set.
 	Bool rls = False;
 	const Char* env = NULL;
 	Bool help = False;
@@ -133,6 +135,7 @@ int wmain(int argc, Char** argv)
 							Char* end_ptr;
 							errno = 0;
 							app_code = wcstol(argv[i + 1], &end_ptr, 10);
+							i++;
 							if (*end_ptr != L'\0' || errno == ERANGE || app_code == 0)
 							{
 								wprintf(L"The option '-a' was used incorrectly.\n");
@@ -140,7 +143,7 @@ int wmain(int argc, Char** argv)
 							}
 						}
 						break;
-					case L'd':
+					case L'd': // This option is only used in Kuin Editor builds.
 						if (not_deploy != False)
 						{
 							wprintf(L"The option '-d' was used incorrectly.\n");
@@ -191,16 +194,20 @@ int wmain(int argc, Char** argv)
 				wprintf(L"Usage: kuincl [-i input.kn] [-o output.kn] [-s 'sys' directory] [-c icon.ico] [-e environment] [-a appcode] [-r] [-h] [-v] [-q]\n");
 				return 0;
 			}
-			if (func_build(input, sys_dir, output, icon, rls, env, Log, LANG, app_code, not_deploy))
+			if (func_build(input, sys_dir, output, icon, related_files, rls, env, Log, LANG, app_code, not_deploy))
 			{
 				if (rls)
 				{
 					U8* res_output = GetDir(output == NULL ? input : output, False, L"res.knd");
 					U8* res_src = GetDir(input, False, L"res/");
-					func_init_compiler(1, -1);
-					if (!func_archive(res_output, res_src, app_code))
-						ret_code = 1;
-					func_fin_compiler();
+					if (PathFileExists((Char*)(res_src + 0x10)) != 0)
+					{
+						func_init_compiler(1, -1);
+						if (!func_archive(res_output, res_src, app_code))
+							ret_code = 1;
+						func_fin_compiler();
+					}
+					free(res_src);
 					free(res_output);
 				}
 			}
